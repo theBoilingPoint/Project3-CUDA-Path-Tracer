@@ -100,7 +100,7 @@
         },
         {
             "TYPE":"mesh",
-            "MESH_PATH":"/home/w123/Desktop/paulina/cis5650/Project3-CUDA-Path-Tracer/scenes/meshes/glb/bathroom.glb",
+            "MESH_PATH":"C:/Users/PaulinaTao/Desktop/UPenn/cis5650/Project3-CUDA-Path-Tracer/scenes/meshes/glb/bathroom.glb",
             "MATERIAL":"bathtub",
             "TRANS":[3.5,0.0,1.0],
             "ROTAT":[0.0,30.0, 0.0],

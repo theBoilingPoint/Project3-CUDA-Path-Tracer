@@ -35,6 +35,47 @@ Scene::Scene(string filename)
     }
 }
 
+Scene::~Scene() {
+    // Clean up texture data (if not already cleaned up by pathtraceFree)
+    for (auto& tex : albedoTextures) {
+        glm::vec4* ptr = std::get<0>(tex);
+        // Check for valid pointer (not nullptr and not obviously corrupted)
+        if (ptr != nullptr && ptr != reinterpret_cast<glm::vec4*>(0xFFFFFFFFFFFFFFFFULL)) {
+            delete[] ptr;
+        }
+    }
+    for (auto& tex : normalTextures) {
+        glm::vec4* ptr = std::get<0>(tex);
+        if (ptr != nullptr && ptr != reinterpret_cast<glm::vec4*>(0xFFFFFFFFFFFFFFFFULL)) {
+            delete[] ptr;
+        }
+    }
+    for (auto& tex : bumpTextures) {
+        glm::vec4* ptr = std::get<0>(tex);
+        if (ptr != nullptr && ptr != reinterpret_cast<glm::vec4*>(0xFFFFFFFFFFFFFFFFULL)) {
+            delete[] ptr;
+        }
+    }
+
+    // Note: triangles should already be cleaned up by pathtraceFree
+    // Only clean them up here if pathtraceFree wasn't called
+    for (Geom& geom : geoms) {
+        Triangle* ptr = geom.triangles;
+        // Check for valid pointer (not nullptr and not obviously corrupted)
+        if (ptr != nullptr && ptr != reinterpret_cast<Triangle*>(0xFFFFFFFFFFFFFFFFULL)) {
+            delete[] ptr;
+            geom.triangles = nullptr;
+        }
+    }
+    for (Geom& light : lights) {
+        Triangle* ptr = light.triangles;
+        if (ptr != nullptr && ptr != reinterpret_cast<Triangle*>(0xFFFFFFFFFFFFFFFFULL)) {
+            delete[] ptr;
+            light.triangles = nullptr;
+        }
+    }
+}
+
 void Scene::loadMesh(const std::string &filepath, Mesh &mesh) {
     if (endsWith(filepath, ".obj")) {
         printf("Loading OBJ file: %s\n", filepath.c_str());
@@ -202,6 +243,11 @@ void Scene::loadFromJSON(const std::string& jsonName)
         newGeom.material.albedoTextureID = -1;
         newGeom.material.normalTextureID = -1;
         newGeom.material.bumpTextureID = -1;
+
+        // Initialize triangles pointer to nullptr to avoid deleting garbage pointers
+        newGeom.triangles = nullptr;
+        newGeom.devTriangles = nullptr;
+        newGeom.numTriangles = 0;
 
         if (type == "cube")
         {

@@ -327,7 +327,20 @@ void pathtraceInit(Scene* scene)
     cudaMemcpy(dev_totalNumberOfLights, &totalNumberOfLights, sizeof(int), cudaMemcpyHostToDevice);
 
     // We've already got the triangles in the device memory, so we can delete them from the host memory
-    delete scene->geoms.data()->triangles;
+    for (Geom &geom : scene->geoms) {
+        if (geom.triangles != nullptr) {
+            delete[] geom.triangles;
+            geom.triangles = nullptr;
+        }
+    }
+
+    // Also clean up lights triangles if they have any
+    for (Geom &light : scene->lights) {
+        if (light.triangles != nullptr) {
+            delete[] light.triangles;
+            light.triangles = nullptr;
+        }
+    }
 
     initialiseTextures(scene);
 
