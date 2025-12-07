@@ -24,12 +24,12 @@ __host__ __device__ void scatterRay(
     glm::vec3 actualAlbedo = m.color;
     glm::vec3 actualNormal = normal;
 
+    // TODO: mind the divergence here
     if (texVals.albedo != glm::vec4(INFINITY)) {
         actualAlbedo = glm::vec3(texVals.albedo);
     }
     
     if (texVals.normal != glm::vec4(INFINITY)) {
-        // texNormal already have *2 - 1 applied
         glm::vec3 texNormal = glm::normalize(glm::vec3(texVals.normal));
         actualNormal = glm::normalize(localToWorld * texNormal);
     }
@@ -44,6 +44,7 @@ __host__ __device__ void scatterRay(
         actualNormal = glm::normalize(actualNormal + du * tangent + dv * bitangent);
     }
 
+    // note: this is where sorting the intersections by material is going to come in very handy
     if (m.type == MatType::DIFFUSE) {
         c = sampleDiffuse(actualAlbedo, actualNormal, sample2D, wiW, eta);
         glm::vec3 wiL = worldToLocal * wiW;
