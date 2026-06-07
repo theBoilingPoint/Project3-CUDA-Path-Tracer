@@ -9,10 +9,10 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# Enable C++11 for host code
-set(CMAKE_CXX_STANDARD 11)
+# CUDA 13.x Thrust requires C++17
+set(CMAKE_CXX_STANDARD 17)
 if(NOT DEFINED CMAKE_CUDA_STANDARD)
-    set(CMAKE_CUDA_STANDARD 11)
+    set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 endif()
 
@@ -49,6 +49,13 @@ endif(UNIX)
 set(GLM_ROOT_DIR "${CMAKE_SOURCE_DIR}/external")
 find_package(GLM REQUIRED)
 include_directories(${GLM_INCLUDE_DIRS})
+
+# CUDA 12+ moved Thrust/CUB into include/cccl/; derive root from nvcc path
+get_filename_component(CUDA_BIN_DIR "${CMAKE_CUDA_COMPILER}" DIRECTORY)
+get_filename_component(CUDA_ROOT "${CUDA_BIN_DIR}" DIRECTORY)
+if(EXISTS "${CUDA_ROOT}/include/cccl")
+    include_directories("${CUDA_ROOT}/include/cccl")
+endif()
 
 set(headers
     src/main.h
@@ -159,4 +166,13 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     )
 target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE "$<$<AND:$<CONFIG:Debug,RelWithDebInfo>,$<COMPILE_LANGUAGE:CUDA>>:-G;-src-in-ptx>")
 target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-lineinfo;-src-in-ptx>")
+target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>")
+if(MSVC)
+    target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>")
+    target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>")
+    # C++17 introduces std::byte; suppress ambiguity with Windows SDK's byte typedef
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE _HAS_STD_BYTE=0)
+    # Prevent Windows SDK from defining min/max macros that break std:: and glm:: calls
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE NOMINMAX)
+endif()
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${CMAKE_PROJECT_NAME})
