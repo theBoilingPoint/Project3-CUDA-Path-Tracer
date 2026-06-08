@@ -121,9 +121,25 @@ void cleanupCuda()
 
 void initCuda()
 {
-    cudaGLSetGLDevice(0);
+    unsigned int glDeviceCount = 0;
+    int glDevices[1] = { 0 };
+    cudaError_t err = cudaGLGetDevices(&glDeviceCount, glDevices, 1, cudaGLDeviceListAll);
+    if (err != cudaSuccess || glDeviceCount == 0) {
+        fprintf(stderr, "cudaGLGetDevices failed (%s). "
+            "No CUDA device is associated with the OpenGL context. "
+            "On a laptop, ensure the app runs on the NVIDIA GPU "
+            "(NVIDIA Control Panel -> Manage 3D Settings -> Program Settings).\n",
+            cudaGetErrorString(err != cudaSuccess ? err : cudaErrorNoDevice));
+        exit(EXIT_FAILURE);
+    }
+    err = cudaGLSetGLDevice(glDevices[0]);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "cudaGLSetGLDevice(%d) failed: %s\n",
+            glDevices[0], cudaGetErrorString(err));
+        exit(EXIT_FAILURE);
+    }
+    printf("CUDA-GL interop using device %d\n", glDevices[0]);
 
-    // Clean up on program exit
     atexit(cleanupCuda);
 }
 

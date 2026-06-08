@@ -2,6 +2,11 @@
 #include "preview.h"
 #include <cstring>
 
+// Force NVIDIA GPU on Optimus / hybrid-graphics laptops so that the OpenGL
+// context and the CUDA device are on the same physical GPU.
+extern "C" { __declspec(dllexport) unsigned long NvOptimusEnablement = 1; }
+extern "C" { __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1; }
+
 static std::string startTimeString;
 
 // For camera controls
