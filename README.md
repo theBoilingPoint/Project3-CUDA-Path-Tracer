@@ -42,6 +42,25 @@ For the rest of the scene, the both the ceiling and the floor use microfacet mat
 # Build Instructions
 Before running, please unzip the `mesh_loader.zip` file in the `src` folder.
 
+Open **x64 Native Tools Command Prompt for VS 2026** (search in Start Menu — make sure it says **x64**), then run:
+```bat
+cmake -S . -B build -G "Visual Studio 18 2026"
+```
+Open `build/cis565_path_tracer.slnx` in Visual Studio to build and run.
+
+> **Why x64 Native Tools?** NVCC requires MSVC's `cl.exe` as its host compiler, targeting x64. The regular "Developer PowerShell" defaults to x86 and causes CUDA compiler detection to crash. Always use the x64 variant.
+
+## clangd (code intelligence)
+This project uses [clangd](https://clangd.llvm.org/) for code intelligence (autocomplete, go-to-definition, diagnostics). clangd requires a `compile_commands.json` file, which the Visual Studio generator does not produce. A separate Ninja configuration is used solely to generate this file — the VS solution in `build/` remains the one used for building.
+
+**Prerequisites:** install [Ninja](https://ninja-build.org/) (`winget install Ninja-build.Ninja`).
+
+From the same **x64 Native Tools Command Prompt for VS 2026**, run:
+```bat
+cmake -S . -B build_ninja -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+```
+`compile_commands.json` will be generated at `build_ninja/compile_commands.json`. Point your clangd extension at that file (or symlink/copy it to the project root).
+
 # Basic Features
 ## Simple BRDFs
 Both images are generated after 1000 iterations.
