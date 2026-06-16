@@ -9,7 +9,7 @@
 #include <unordered_map>
 
 #include "glm/glm.hpp"
-#include "json.hpp"
+#include <nlohmann/json.hpp>
 
 #include "utilities.h"
 #include "sceneStructs.h"

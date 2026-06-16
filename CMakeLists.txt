@@ -31,13 +31,13 @@ if(UNIX)
     find_package(GLEW REQUIRED)
     set(LIBRARIES glfw ${GLEW_LIBRARIES} ${OPENGL_LIBRARIES})
 else(UNIX)
-    set(EXTERNAL "${CMAKE_SOURCE_DIR}/external")
+    set(PREBUILT "${CMAKE_SOURCE_DIR}/libs/prebuilt")
 
-    set(GLFW_ROOT_DIR ${EXTERNAL})
+    set(GLFW_ROOT_DIR ${PREBUILT})
     set(GLFW_USE_STATIC_LIBS ON)
     find_package(GLFW REQUIRED)
 
-    set(GLEW_ROOT_DIR ${EXTERNAL})
+    set(GLEW_ROOT_DIR ${PREBUILT})
     set(GLEW_USE_STATIC_LIBS ON)
     find_package(GLEW REQUIRED)
 
@@ -47,9 +47,9 @@ else(UNIX)
     set(LIBRARIES ${GLEW_LIBRARY} ${GLFW_LIBRARY} ${OPENGL_LIBRARY})
 endif(UNIX)
 
-set(GLM_ROOT_DIR "${CMAKE_SOURCE_DIR}/external")
-find_package(GLM REQUIRED)
-include_directories(${GLM_INCLUDE_DIRS})
+include_directories(${CMAKE_SOURCE_DIR}/libs/glm)
+include_directories(${CMAKE_SOURCE_DIR}/libs/json/single_include)
+include_directories(${CMAKE_SOURCE_DIR}/libs/stb)
 
 # CUDA 12+ moved Thrust/CUB into include/cccl/; derive root from nvcc path
 get_filename_component(CUDA_BIN_DIR "${CMAKE_CUDA_COMPILER}" DIRECTORY)
@@ -93,41 +93,41 @@ set(sources
 )
 
 set(imgui_headers
-    src/ImGui/imconfig.h
-    src/ImGui/imgui.h
-    src/ImGui/imgui_impl_glfw.h
-    src/ImGui/imgui_impl_opengl3.h
-    src/ImGui/imgui_impl_opengl3_loader.h
-    src/ImGui/imgui_internal.h
-    src/ImGui/imstb_rectpack.h
-    src/ImGui/imstb_textedit.h
-    src/ImGui/imstb_truetype.h
+    libs/ImGui/imconfig.h
+    libs/ImGui/imgui.h
+    libs/ImGui/imgui_internal.h
+    libs/ImGui/imstb_rectpack.h
+    libs/ImGui/imstb_textedit.h
+    libs/ImGui/imstb_truetype.h
+    libs/ImGui/backends/imgui_impl_glfw.h
+    libs/ImGui/backends/imgui_impl_opengl3.h
+    libs/ImGui/backends/imgui_impl_opengl3_loader.h
 )
 
 set(imgui_sources
-    src/ImGui/imgui.cpp
-    src/ImGui/imgui_demo.cpp
-    src/ImGui/imgui_draw.cpp
-    src/ImGui/imgui_impl_glfw.cpp
-    src/ImGui/imgui_impl_opengl3.cpp
-    src/ImGui/imgui_tables.cpp
-    src/ImGui/imgui_widgets.cpp
+    libs/ImGui/imgui.cpp
+    libs/ImGui/imgui_demo.cpp
+    libs/ImGui/imgui_draw.cpp
+    libs/ImGui/imgui_tables.cpp
+    libs/ImGui/imgui_widgets.cpp
+    libs/ImGui/backends/imgui_impl_glfw.cpp
+    libs/ImGui/backends/imgui_impl_opengl3.cpp
 )
 
 set(tinyobj_headers
-    src/tinyobjloader/tiny_obj_loader.h
+    libs/tinyobjloader/tiny_obj_loader.h
 )
 
 set(tinyobj_sources
-    src/tinyobjloader/tiny_obj_loader.cc
+    libs/tinyobjloader/tiny_obj_loader.cc
 )
 
 set(tinygltf_headers
-    src/tinygltf/tiny_gltf.h
+    libs/tinygltf/tiny_gltf.h
 )
 
 set(tinygltf_sources
-    src/tinygltf/tiny_gltf.cc
+    libs/tinygltf/tiny_gltf.cc
 )
 
 list(SORT headers)
@@ -160,6 +160,7 @@ elseif(CMAKE_VERSION VERSION_LESS "3.24.0")
 else()
     set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CUDA_ARCHITECTURES native)
 endif()
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/libs ${CMAKE_SOURCE_DIR}/libs/ImGui)
 target_link_libraries(${CMAKE_PROJECT_NAME}
     ${LIBRARIES}
     cudadevrt

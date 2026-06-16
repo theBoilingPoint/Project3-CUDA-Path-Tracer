@@ -427,17 +427,16 @@ void Scene::loadFromJSON(const std::string& jsonName)
     float fovx = (atan(xscaled) * 180) / PI;
     camera.fov = glm::vec2(fovx, fovy);
 
+    camera.view = glm::normalize(camera.lookAt - camera.position);
     camera.right = glm::normalize(glm::cross(camera.view, camera.up));
     camera.pixelLength = glm::vec2(2 * xscaled / (float)camera.resolution.x,
         2 * yscaled / (float)camera.resolution.y);
-
-    camera.view = glm::normalize(camera.lookAt - camera.position);
 
     //set up render camera stuff
     int arraylen = camera.resolution.x * camera.resolution.y;
     state.image.resize(arraylen);
     std::fill(state.image.begin(), state.image.end(), glm::vec3());
 
-    printf("Scene loaded with %d triangles, %d materials, %d albedo textures, %d normal textures, %d bump textures, %d objects, %d lights\n",
+    printf("Scene loaded with %d triangles, %zu materials, %zu albedo textures, %zu normal textures, %zu bump textures, %zu objects, %zu lights\n",
         numOfFaces, materials.size(), albedoTextures.size(), normalTextures.size(), bumpTextures.size(), geoms.size(), lights.size());
 }

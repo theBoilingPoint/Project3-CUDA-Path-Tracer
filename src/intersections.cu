@@ -134,46 +134,52 @@ __host__ __device__ float meshIntersectionTestNaive(
     for (int i = 0; i < mesh.numTriangles; i++) {
         const Triangle &tri = mesh.devTriangles[i];
 
-        glm::vec3 baryPosition;  // To store barycentric coordinates
-
-        // Perform ray-triangle intersection
+        glm::vec2 baryCoords;
+        float hitDist;
         bool hit = glm::intersectRayTriangle(
-            originLocal,                             // Ray origin in local space
-            directionLocal,                          // Ray direction in local space
-            tri.points[0], tri.points[1], tri.points[2],  // Triangle vertices
-            baryPosition);                           // Barycentric coordinates (output)
+            originLocal, directionLocal,
+            tri.points[0], tri.points[1], tri.points[2],
+            baryCoords, hitDist);
 
-        // Check if the ray hits the triangle and if the hit is closer than the current closest hit
-        if (!hit || baryPosition.z < 0.0f || baryPosition.z >= t) {
-            continue; // Skip if no hit or the intersection is farther than the previous closest
+        if (!hit) {
+            // Try reversed winding to hit back faces
+            glm::vec2 baryRev;
+            hit = glm::intersectRayTriangle(
+                originLocal, directionLocal,
+                tri.points[0], tri.points[2], tri.points[1],
+                baryRev, hitDist);
+            if (hit) {
+                // Swap coords: baryRev.x=weight(points[2]), baryRev.y=weight(points[1])
+                baryCoords = glm::vec2(baryRev.y, baryRev.x);
+            }
         }
 
-        // Update the closest intersection point
-        t = baryPosition.z;
+        if (!hit || hitDist >= t) {
+            continue;
+        }
 
-        const float alpha = baryPosition.x;
-        const float beta = baryPosition.y;
-        const float gamma = 1.0f - alpha - beta;
+        t = hitDist;
 
-        // Calculate the intersection point using barycentric coordinates
-        glm::vec3 intersectionPointLocal = alpha * tri.points[0] +
-                                           beta * tri.points[1] +
-                                           gamma * tri.points[2];
+        // baryCoords.x = weight for points[1], baryCoords.y = weight for points[2]
+        const float u = baryCoords.x;
+        const float v = baryCoords.y;
+        const float w = 1.0f - u - v;
+
+        glm::vec3 intersectionPointLocal = w * tri.points[0] +
+                                           u * tri.points[1] +
+                                           v * tri.points[2];
 
         finalIntersectionPoint = multiplyMV(mesh.transform, glm::vec4(intersectionPointLocal, 1.0f));
 
-        // Interpolate triangle normals based on barycentric coordinates
-        glm::vec3 normalLocal = glm::normalize(alpha * tri.normals[0] +
-                                               beta * tri.normals[1] +
-                                               gamma * tri.normals[2]);
+        glm::vec3 normalLocal = glm::normalize(w * tri.normals[0] +
+                                               u * tri.normals[1] +
+                                               v * tri.normals[2]);
 
-        // Transform the normal to world space using inverse transpose
         finalNormal = glm::normalize(multiplyMV(mesh.invTranspose, glm::vec4(normalLocal, 0.0f)));
 
-        // Interpolate the UV coordinates based on barycentric coordinates
-        glm::vec2 uvLocal = alpha * tri.uvs[0] +
-                            beta * tri.uvs[1] +
-                            gamma * tri.uvs[2];
+        glm::vec2 uvLocal = w * tri.uvs[0] +
+                            u * tri.uvs[1] +
+                            v * tri.uvs[2];
 
         finalUV = uvLocal;
 

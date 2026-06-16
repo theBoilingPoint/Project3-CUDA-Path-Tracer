@@ -40,9 +40,25 @@ whereas those of the second one uses a light material:
 For the rest of the scene, the both the ceiling and the floor use microfacet materials. The mesh (the sink and the bathtub) is loaded from a .glb file with its default textures and uses a diffuse material. The bubbles are dielectrics with index of refraction 1.33. Furthermore, we have a big white light hanging on the ceiling and a mirror on the left wall. Additionally, the depth of field (DOF) effect can be seen at the blurrred bubbles.
 
 # Build Instructions
-Before running, please unzip the `mesh_loader.zip` file in the `src` folder.
 
-Open **x64 Native Tools Command Prompt for VS 2026** (search in Start Menu — make sure it says **x64**), then run:
+## Quick Start (Recommended)
+
+**Prerequisites:** install [Ninja](https://ninja-build.org/) (`winget install Ninja-build.Ninja`).
+
+Run the build script from the project root:
+```bat
+scripts\build.bat
+```
+This will:
+1. Configure and build the project using the Visual Studio 2026 generator (produces `build/cis565_path_tracer.slnx`)
+2. Run a second CMake configure with Ninja to generate `compile_commands.json` for clangd
+3. Copy `compile_commands.json` into `build/` and remove the temporary Ninja build folder
+
+Open `build/cis565_path_tracer.slnx` in Visual Studio to run.
+
+## Manual Build (Without the Script)
+
+If you prefer to run the steps yourself, open **x64 Native Tools Command Prompt for VS 2026** (search in Start Menu — make sure it says **x64**), then run:
 ```bat
 cmake -S . -B build -G "Visual Studio 18 2026"
 ```
@@ -50,16 +66,16 @@ Open `build/cis565_path_tracer.slnx` in Visual Studio to build and run.
 
 > **Why x64 Native Tools?** NVCC requires MSVC's `cl.exe` as its host compiler, targeting x64. The regular "Developer PowerShell" defaults to x86 and causes CUDA compiler detection to crash. Always use the x64 variant.
 
-## clangd (code intelligence)
+### clangd (code intelligence)
 This project uses [clangd](https://clangd.llvm.org/) for code intelligence (autocomplete, go-to-definition, diagnostics). clangd requires a `compile_commands.json` file, which the Visual Studio generator does not produce. A separate Ninja configuration is used solely to generate this file — the VS solution in `build/` remains the one used for building.
-
-**Prerequisites:** install [Ninja](https://ninja-build.org/) (`winget install Ninja-build.Ninja`).
 
 From the same **x64 Native Tools Command Prompt for VS 2026**, run:
 ```bat
-cmake -S . -B build_ninja -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake -S . -B build_ninja -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+copy build_ninja\compile_commands.json build\compile_commands.json
+rmdir /S /Q build_ninja
 ```
-`compile_commands.json` will be generated at `build_ninja/compile_commands.json`. Point your clangd extension at that file (or symlink/copy it to the project root).
+`compile_commands.json` is produced during the configure step — no build required.
 
 # Basic Features
 ## Simple BRDFs
