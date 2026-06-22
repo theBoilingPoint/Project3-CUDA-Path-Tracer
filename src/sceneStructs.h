@@ -1,8 +1,10 @@
 #pragma once
 
+#include "glm/fwd.hpp"
 #include "glm/glm.hpp"
 #include <cstddef>
 #include <cuda_runtime.h>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -42,27 +44,68 @@ struct Triangle {
           normals{n1, n2, n3}, uvs{glm::vec2(), glm::vec2(), glm::vec2()} {}
 };
 
+struct BoundingBox {
+    glm::vec3 min;
+    glm::vec3 max;
+
+    // Default to an empty/inverted box so accumulating via glm::min/glm::max
+    // (PBRT's Union) starts from a neutral element.
+    BoundingBox()
+        : min(glm::vec3(std::numeric_limits<float>::max())),
+          max(glm::vec3(std::numeric_limits<float>::lowest())) {}
+
+    BoundingBox(const glm::vec3 &min, const glm::vec3 &max)
+        : min(min), max(max) {}
+
+    BoundingBox(const Triangle &triangle) {
+        min = glm::min(triangle.points[0],
+                       glm::min(triangle.points[1], triangle.points[2]));
+        max = glm::max(triangle.points[0],
+                       glm::max(triangle.points[1], triangle.points[2]));
+    }
+
+    glm::vec3 diagonal() const { return max - min; }
+
+    float surfaceArea() const {
+        glm::vec3 d = diagonal();
+        return 2.0f * (d.x * d.y + d.x * d.z + d.y * d.z);
+    }
+
+    glm::vec3 offset(const glm::vec3 &p) const {
+        glm::vec3 o = p - min;
+        if (max.x > min.x)
+            o.x /= max.x - min.x;
+        if (max.y > min.y)
+            o.y /= max.y - min.y;
+        if (max.z > min.z)
+            o.z /= max.z - min.z;
+        return o;
+    }
+
+    int maxDimension() const {
+        glm::vec3 d = diagonal();
+        if (d.x > d.y && d.x > d.z)
+            return 0;
+        else if (d.y > d.z)
+            return 1;
+        else
+            return 2;
+    }
+};
+
 struct BVHTriangle {
-    size_t index;
-    glm::vec3 points[3];
-    glm::vec3 planeNormal;
-    glm::vec3 normals[3];
-    glm::vec2 uvs[3];
-    glm::vec3 bounds[2];
+    size_t triangleIndex;
+    BoundingBox bbox;
 
     BVHTriangle() = default;
-    BVHTriangle(size_t idx, Triangle triangle)
-        : index(idx), planeNormal(triangle.planeNormal) {
-        for (int i = 0; i < 3; i++) {
-            points[i] = triangle.points[i];
-            normals[i] = triangle.normals[i];
-            uvs[i] = triangle.uvs[i];
-        }
-        bounds[0] = glm::min(triangle.points[0],
-                             glm::min(triangle.points[1], triangle.points[2]));
-        bounds[1] = glm::max(triangle.points[0],
-                             glm::max(triangle.points[1], triangle.points[2]));
-    }
+    BVHTriangle(size_t idx, BoundingBox box) : triangleIndex(idx), bbox(box) {}
+
+    glm::vec3 centroid() const { return 0.5f * bbox.min + 0.5f * bbox.max; }
+};
+
+struct BVHSplitBucket {
+    int count = 0;
+    BoundingBox bbox;
 };
 
 struct Geom {

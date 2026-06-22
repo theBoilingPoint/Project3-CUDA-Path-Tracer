@@ -5,21 +5,22 @@
  */
 #pragma once
 
+#include "glm/common.hpp"
 #include "glm/glm.hpp"
 #include "sceneStructs.h"
+#include <algorithm>
+#include <span>
 #include <vector>
-
-#define BVH_CHILDREN 8
 
 using namespace std;
 
 // Here we use BVH8. Arguably, we can also use BVH4 or a binary tree.
 // This class is used for constructing the BVH.
 class BVHNode {
-    glm::vec3 bboxMin;
-    glm::vec3 bboxMax;
+  private:
+    BoundingBox bbox;
     // only leaf nodes will store actual geometry references
-    BVHNode *children[BVH_CHILDREN];
+    BVHNode *children[2];
     // which axis was used to split this node
     int splitAxis;
     // offset to the first primitive in the global primitive array
@@ -28,16 +29,21 @@ class BVHNode {
     // of the list of primitives stored in this node
     int nPrimitives;
 
-    void initializeLeaf(int first, int n, const glm::vec3 &boxMin,
-                        const glm::vec3 &boxMax);
+  public:
+    void initializeLeaf(int first, int n, const BoundingBox &bbox);
 
-    void initializeInterior(int axis, BVHNode *c[BVH_CHILDREN]);
+    void initializeInterior(int axis, BVHNode *c[2]);
 };
 
 class BVH {
-    BVH(vector<Triangle> &triangles);
-
   private:
+    int maxPrimsInNode;
+
     void initialize(vector<Triangle> &triangles);
-    BVHNode *buildBVH();
+    BVHNode *buildBVH(vector<Triangle> &triangles,
+                      span<BVHTriangle> bvhTriangles, int *totalNodes,
+                      int &orderedPrimsOffset, vector<Triangle> &orderedPrims);
+
+  public:
+    BVH(vector<Triangle> &triangles, int _maxPrimsInNode);
 };
