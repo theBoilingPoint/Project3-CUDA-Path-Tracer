@@ -1,59 +1,59 @@
 #pragma once
 
-#include <vector>
-#include <sstream>
+#include <cstring>
 #include <fstream>
 #include <iostream>
-#include <fstream>
-#include <cstring>
+#include <sstream>
 #include <unordered_map>
+#include <vector>
 
 #include "glm/glm.hpp"
 #include <nlohmann/json.hpp>
 
-#include "utilities.h"
-#include "sceneStructs.h"
-#include "meshLoader.h"
 #include "bvh.h"
+#include "meshLoader.h"
+#include "sceneStructs.h"
+#include "utilities.h"
 
 using namespace std;
 using json = nlohmann::json;
 
-class Mesh {   
-public:
+class Mesh {
+  public:
     Mesh();
     ~Mesh();
 
-    std::vector<Triangle> faces;
-    std::vector<int> indices;
-    std::vector<glm::vec3> verts;
-    std::vector<glm::vec3> normals;
-    std::vector<glm::vec2> uvs;
+    vector<Triangle> faces;
+    vector<int> indices;
+    vector<glm::vec3> verts;
+    vector<glm::vec3> normals;
+    vector<glm::vec2> uvs;
 
-    // The glm::vec4* in each of this vars is deleted in pathrace.cu once they are loaded to the GPU
-    std::vector<tuple<std::string, glm::vec4*, glm::ivec2>> albedoTextures;
-    std::vector<tuple<std::string, glm::vec4*, glm::ivec2>> normalTextures;
-    std::vector<tuple<std::string, glm::vec4*, glm::ivec2>> bumpTextures;
+    // The glm::vec4* in each of this vars is deleted in pathrace.cu once they
+    // are loaded to the GPU
+    vector<tuple<string, glm::vec4 *, glm::ivec2>> albedoTextures;
+    vector<tuple<string, glm::vec4 *, glm::ivec2>> normalTextures;
+    vector<tuple<string, glm::vec4 *, glm::ivec2>> bumpTextures;
 };
 
-class Scene
-{
-private:
+class Scene {
+  private:
     ifstream fp_in;
 
-    void loadMesh(const std::string &filepath, Mesh &mesh);
-    void loadFromJSON(const std::string& jsonName);
+    void loadMesh(const string &filepath, Mesh &mesh);
+    void loadFromJSON(const string &jsonName);
     template <typename T>
-    void getValueFromJson(const json &data, const std::string &key, T &value);
-public:
+    void getValueFromJson(const json &data, const string &key, T &value);
+
+  public:
     Scene(string filename);
     ~Scene();
 
-    std::vector<Geom> geoms;
-    std::vector<Geom> lights;
-    std::vector<Material> materials;
-    std::vector<tuple<glm::vec4*, glm::ivec2>> albedoTextures;
-    std::vector<tuple<glm::vec4*, glm::ivec2>> normalTextures;
-    std::vector<tuple<glm::vec4*, glm::ivec2>> bumpTextures;
+    vector<Geom> geoms;
+    vector<Geom> lights;
+    vector<Material> materials;
+    vector<tuple<glm::vec4 *, glm::ivec2>> albedoTextures;
+    vector<tuple<glm::vec4 *, glm::ivec2>> normalTextures;
+    vector<tuple<glm::vec4 *, glm::ivec2>> bumpTextures;
     RenderState state;
 };

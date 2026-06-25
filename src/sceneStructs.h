@@ -93,19 +93,14 @@ struct BoundingBox {
     }
 };
 
-struct BVHTriangle {
-    size_t triangleIndex;
+struct alignas(32) LinearBVHNode {
     BoundingBox bbox;
-
-    BVHTriangle() = default;
-    BVHTriangle(size_t idx, BoundingBox box) : triangleIndex(idx), bbox(box) {}
-
-    glm::vec3 centroid() const { return 0.5f * bbox.min + 0.5f * bbox.max; }
-};
-
-struct BVHSplitBucket {
-    int count = 0;
-    BoundingBox bbox;
+    union {
+        int primitivesOffset;  // leaf
+        int secondChildOffset; // interior
+    };
+    uint16_t nPrimitives; // 0 -> interior node
+    uint8_t axis;         // interior node: xyz
 };
 
 struct Geom {

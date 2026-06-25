@@ -1,5 +1,6 @@
 #include "bvh.h"
 #include "sceneStructs.h"
+#include <cassert>
 
 void BVHNode::initializeLeaf(int first, int n, const BoundingBox &box) {
     firstPrimOffset = first;
@@ -26,25 +27,36 @@ void BVHNode::initializeInterior(int axis, BVHNode *c[2]) {
     nPrimitives = 0;
 }
 
-BVH::BVH(vector<Triangle> &triangles, int _maxPrimsInNode)
-    : maxPrimsInNode(min(255, _maxPrimsInNode)) {}
+BVH::BVH(vector<Triangle> &tris, int _maxPrimsInNode)
+    : maxPrimsInNode(min(255, _maxPrimsInNode)) {
+    initialize(tris);
+}
 
-void BVH::initialize(vector<Triangle> &triangles) {
-    vector<BVHTriangle> bvhTriangles(triangles.size());
-    for (int i = 0; i < triangles.size(); ++i) {
-        bvhTriangles[i] = BVHTriangle(i, triangles[i]);
+void BVH::initialize(vector<Triangle> &tris) {
+    vector<BVHTriangle> bvhTriangles(tris.size());
+    for (int i = 0; i < tris.size(); ++i) {
+        bvhTriangles[i] = BVHTriangle(i, tris[i]);
     }
 
     int totalNodes = 0;
     int orderedPrimsOffset = 0;
-    vector<Triangle> orderedPrims(triangles.size());
-    BVHNode *root = buildBVH(triangles, bvhTriangles, &totalNodes,
+    vector<Triangle> orderedPrims(tris.size());
+    BVHNode *root = buildBVH(tris, bvhTriangles, &totalNodes,
                              orderedPrimsOffset, orderedPrims);
+    triangles.swap(orderedPrims);
+
+    bvhTriangles.resize(0);
+    bvhTriangles.shrink_to_fit();
+    nodes = new LinearBVHNode[totalNodes];
+    int offset = 0;
+    flattenBVH(root, &offset);
+
+    // The temporary pointer-based tree is no longer needed once flattened.
+    freeBVHTree(root);
 }
 
-BVHNode *BVH::buildBVH(vector<Triangle> &triangles,
-                       span<BVHTriangle> bvhTriangles, int *totalNodes,
-                       int &orderedPrimsOffset,
+BVHNode *BVH::buildBVH(vector<Triangle> &tris, span<BVHTriangle> bvhTriangles,
+                       int *totalNodes, int &orderedPrimsOffset,
                        vector<Triangle> &orderedPrims) {
     ++*totalNodes;
     BVHNode *node = new BVHNode();
@@ -62,7 +74,7 @@ BVHNode *BVH::buildBVH(vector<Triangle> &triangles,
         orderedPrimsOffset += bvhTriangles.size();
         for (size_t i = 0; i < bvhTriangles.size(); ++i) {
             int index = bvhTriangles[i].triangleIndex;
-            orderedPrims[firstPrimOffset + i] = triangles[index];
+            orderedPrims[firstPrimOffset + i] = tris[index];
         }
 
         node->initializeLeaf(firstPrimOffset, bvhTriangles.size(), bbox);
@@ -81,7 +93,7 @@ BVHNode *BVH::buildBVH(vector<Triangle> &triangles,
             orderedPrimsOffset += bvhTriangles.size();
             for (size_t i = 0; i < bvhTriangles.size(); ++i) {
                 int index = bvhTriangles[i].triangleIndex;
-                orderedPrims[firstPrimOffset + i] = triangles[index];
+                orderedPrims[firstPrimOffset + i] = tris[index];
             }
 
             node->initializeLeaf(firstPrimOffset, bvhTriangles.size(), bbox);
@@ -170,7 +182,7 @@ BVHNode *BVH::buildBVH(vector<Triangle> &triangles,
                     orderedPrimsOffset += bvhTriangles.size();
                     for (size_t i = 0; i < bvhTriangles.size(); ++i) {
                         int index = bvhTriangles[i].triangleIndex;
-                        orderedPrims[firstPrimOffset + i] = triangles[index];
+                        orderedPrims[firstPrimOffset + i] = tris[index];
                     }
                     node->initializeLeaf(firstPrimOffset, bvhTriangles.size(),
                                          bbox);
@@ -180,11 +192,10 @@ BVHNode *BVH::buildBVH(vector<Triangle> &triangles,
 
             BVHNode *children[2];
             children[0] =
-                buildBVH(triangles, bvhTriangles.subspan(0, mid), totalNodes,
+                buildBVH(tris, bvhTriangles.subspan(0, mid), totalNodes,
                          orderedPrimsOffset, orderedPrims);
-            children[1] =
-                buildBVH(triangles, bvhTriangles.subspan(mid), totalNodes,
-                         orderedPrimsOffset, orderedPrims);
+            children[1] = buildBVH(tris, bvhTriangles.subspan(mid), totalNodes,
+                                   orderedPrimsOffset, orderedPrims);
 
             BVHNode *c[2] = {children[0], children[1]};
             node->initializeInterior(dim, c);
@@ -192,4 +203,35 @@ BVHNode *BVH::buildBVH(vector<Triangle> &triangles,
     }
 
     return node;
+}
+
+int BVH::flattenBVH(BVHNode *node, int *offset) {
+    LinearBVHNode *linearNode = &nodes[*offset];
+    linearNode->bbox = node->bbox;
+    int nodeOffset = (*offset)++;
+
+    if (node->nPrimitives > 0) {
+        assert(!node->children[0] && !node->children[1]);
+        linearNode->primitivesOffset = node->firstPrimOffset;
+        linearNode->nPrimitives = node->nPrimitives;
+    } else {
+        // Create interior flattened BVH node
+        linearNode->axis = node->splitAxis;
+        linearNode->nPrimitives = 0;
+        flattenBVH(node->children[0], offset);
+        linearNode->secondChildOffset = flattenBVH(node->children[1], offset);
+    }
+
+    return nodeOffset;
+}
+
+// Recursively frees the temporary BVHNode tree built by buildBVH once it has
+// been flattened into the linear node array.
+void BVH::freeBVHTree(BVHNode *node) {
+    if (!node) {
+        return;
+    }
+    freeBVHTree(node->children[0]);
+    freeBVHTree(node->children[1]);
+    delete node;
 }

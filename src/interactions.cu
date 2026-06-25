@@ -15,6 +15,16 @@ __host__ __device__ void scatterRay(
     const TextureValues& texVals,
     thrust::default_random_engine &rng)
 {
+    // Interpolated (smooth) vertex normals and back-face hits can leave the
+    // shading normal pointing away from the viewer (dot(normal, woW) < 0),
+    // which flips the local shading frame and produces inverted/"funny"
+    // shading. Reflective lobes assume the normal faces woW, so face-forward it.
+    // Dielectric is left untouched: it needs the true two-sided normal to tell
+    // whether the ray is entering or exiting the surface.
+    if (m.type != MatType::DIELECTRIC && glm::dot(normal, woW) < 0.0f) {
+        normal = -normal;
+    }
+
     glm::mat3 worldToLocal = WorldToLocal(normal);
     glm::mat3 localToWorld = LocalToWorld(normal);
     glm::vec3 woL = worldToLocal * woW; 

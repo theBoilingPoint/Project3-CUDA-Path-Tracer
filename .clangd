@@ -1,0 +1,21 @@
+# clangd config for this CUDA project.
+# compile_commands.json is generated from nvcc command lines, which clangd
+# (a clang-based tool) cannot consume directly. We strip nvcc-only flags and
+# force clang into CUDA mode pointed at the installed toolkit.
+CompileFlags:
+  Add:
+    - --cuda-path=C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3
+    - --cuda-gpu-arch=sm_75
+    - --no-cuda-version-check
+  Remove:
+    - -forward-unknown-to-host-compiler
+    - -Xcompiler*
+    - -Xcudafe*
+    - -arch=*
+    - -rdc=*
+    - -G
+    - -src-in-ptx
+    - --expt-relaxed-constexpr
+    - -gencode*
+    - --generate-code*
+    - --options-file
