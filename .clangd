@@ -7,6 +7,12 @@ CompileFlags:
     - --cuda-path=C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3
     - --cuda-gpu-arch=sm_75
     - --no-cuda-version-check
+    # glm's assert() expands to MSVC's _wassert (a __host__ function), which
+    # clang rejects when reached from __host__ __device__ code. Defining NDEBUG
+    # for analysis removes the call at its source (real build is unaffected) and,
+    # unlike suppressing the diagnostic, keeps genuine host-in-device errors in
+    # our own code visible.
+    - -DNDEBUG
   Remove:
     - -forward-unknown-to-host-compiler
     - -Xcompiler*
@@ -19,3 +25,9 @@ CompileFlags:
     - -gencode*
     - --generate-code*
     - --options-file
+Diagnostics:
+  # CUDA 13.3's CCCL headers (cuda/std/string_view) annotate deduction guides
+  # with __host__, which clang 22's CUDA frontend rejects. nvcc compiles fine;
+  # this is purely a clang/CCCL version mismatch in a library header.
+  Suppress:
+    - deduction_guide_target_attr

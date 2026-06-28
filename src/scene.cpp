@@ -1,8 +1,6 @@
 #include "scene.h"
-#include "bvh.h"
+
 #include <glm/gtc/matrix_inverse.hpp>
-#include <glm/gtx/string_cast.hpp>
-#include <typeinfo> // Required for typeid
 
 #define USE_SELF_LOADED_TEXTURES 1
 
@@ -60,20 +58,20 @@ Scene::~Scene() {
     // Note: triangles should already be cleaned up by pathtraceFree
     // Only clean them up here if pathtraceFree wasn't called
     for (Geom &geom : geoms) {
-        Triangle *ptr = geom.triangles;
+        Triangle *ptr = geom.geometry.triangles;
         // Check for valid pointer (not nullptr and not obviously corrupted)
         if (ptr != nullptr &&
             ptr != reinterpret_cast<Triangle *>(0xFFFFFFFFFFFFFFFFULL)) {
             delete[] ptr;
-            geom.triangles = nullptr;
+            geom.geometry.triangles = nullptr;
         }
     }
     for (Geom &light : lights) {
-        Triangle *ptr = light.triangles;
+        Triangle *ptr = light.geometry.triangles;
         if (ptr != nullptr &&
             ptr != reinterpret_cast<Triangle *>(0xFFFFFFFFFFFFFFFFULL)) {
             delete[] ptr;
-            light.triangles = nullptr;
+            light.geometry.triangles = nullptr;
         }
     }
 }
@@ -269,9 +267,9 @@ void Scene::loadFromJSON(const std::string &jsonName) {
 
         // Initialize triangles pointer to nullptr to avoid deleting garbage
         // pointers
-        newGeom.triangles = nullptr;
-        newGeom.devTriangles = nullptr;
-        newGeom.numTriangles = 0;
+        newGeom.geometry.triangles = nullptr;
+        newGeom.geometry.devTriangles = nullptr;
+        newGeom.geometry.numTriangles = 0;
 
         if (type == "cube") {
             newGeom.type = CUBE;
@@ -285,7 +283,14 @@ void Scene::loadFromJSON(const std::string &jsonName) {
                 exit(-1);
             }
 
-            const auto &filepath = p["MESH_PATH"];
+            // MESH_PATH may be relative; resolve it against the directory of
+            // the scene JSON file rather than the process working directory.
+            std::filesystem::path meshPath(p["MESH_PATH"].get<std::string>());
+            if (meshPath.is_relative()) {
+                meshPath =
+                    std::filesystem::path(jsonName).parent_path() / meshPath;
+            }
+            std::string filepath = meshPath.string();
             Mesh newMesh;
             loadMesh(filepath, newMesh);
 
@@ -295,28 +300,26 @@ void Scene::loadFromJSON(const std::string &jsonName) {
                    newMesh.faces.size(), newMesh.indices.size(),
                    newMesh.uvs.size());
 
-            // Get the faces (triangles) from the Mesh object
-            std::vector<Triangle> &triangles = newMesh.faces;
-            size_t numTriangles = triangles.size();
+            // Build the BVH. This reorders the mesh faces into bvh.triangles,
+            // matching the order the linear BVH nodes index into.
+            BVH bvh(newMesh.faces);
 
+            size_t numTriangles = bvh.triangles.size();
             if (numTriangles == 0) {
                 std::cerr << "No triangles found in mesh object" << std::endl;
                 exit(-1);
             }
 
-            newGeom.numTriangles = static_cast<int>(numTriangles);
-            newGeom.triangles = new Triangle[numTriangles];
-
-            for (size_t i = 0; i < numTriangles; i++) {
-                // Copy the triangles from `Mesh` to `Geom`
-                newGeom.triangles[i] = triangles[i];
-            }
+            newGeom.geometry.numTriangles = static_cast<int>(numTriangles);
+            // Own a heap-allocated copy of the triangles. The Scene destructor
+            // frees this with delete[], so it must be a new[] block and must
+            // outlive the local `bvh` (whose vector buffer is freed at the end
+            // of this scope).
+            newGeom.geometry.triangles = new Triangle[numTriangles];
+            std::copy(bvh.triangles.begin(), bvh.triangles.end(),
+                      newGeom.geometry.triangles);
 
             numOfFaces += numTriangles;
-
-            /** Here we are populating triangles from BVH **/
-            BVH bvh = BVH(newMesh.faces);
-            newGeom.triangles = bvh.triangles.data();
 
 #if USE_SELF_LOADED_TEXTURES
             /** Here we are reading the textures if there are any **/
@@ -398,13 +401,17 @@ void Scene::loadFromJSON(const std::string &jsonName) {
         const auto &trans = p["TRANS"];
         const auto &rotat = p["ROTAT"];
         const auto &scale = p["SCALE"];
-        newGeom.translation = glm::vec3(trans[0], trans[1], trans[2]);
-        newGeom.rotation = glm::vec3(rotat[0], rotat[1], rotat[2]);
-        newGeom.scale = glm::vec3(scale[0], scale[1], scale[2]);
-        newGeom.transform = utilityCore::buildTransformationMatrix(
-            newGeom.translation, newGeom.rotation, newGeom.scale);
-        newGeom.inverseTransform = glm::inverse(newGeom.transform);
-        newGeom.invTranspose = glm::inverseTranspose(newGeom.transform);
+
+        newGeom.transform.translation = glm::vec3(trans[0], trans[1], trans[2]);
+        newGeom.transform.rotation = glm::vec3(rotat[0], rotat[1], rotat[2]);
+        newGeom.transform.scale = glm::vec3(scale[0], scale[1], scale[2]);
+        newGeom.transform.transform = utilityCore::buildTransformationMatrix(
+            newGeom.transform.translation, newGeom.transform.rotation,
+            newGeom.transform.scale);
+        newGeom.transform.inverseTransform =
+            glm::inverse(newGeom.transform.transform);
+        newGeom.transform.invTranspose =
+            glm::inverseTranspose(newGeom.transform.transform);
 
         geoms.push_back(newGeom);
         if (mat == "light") {
@@ -434,6 +441,7 @@ void Scene::loadFromJSON(const std::string &jsonName) {
     camera.position = glm::vec3(pos[0], pos[1], pos[2]);
     camera.lookAt = glm::vec3(lookat[0], lookat[1], lookat[2]);
     camera.up = glm::vec3(up[0], up[1], up[2]);
+
     if (!cameraData.contains("LENS_RADIUS")) {
         printf("You haven't specified "
                "LENS_RADIUS"
@@ -456,6 +464,7 @@ void Scene::loadFromJSON(const std::string &jsonName) {
     float yscaled = tan(fovy * (PI / 180));
     float xscaled = (yscaled * camera.resolution.x) / camera.resolution.y;
     float fovx = (atan(xscaled) * 180) / PI;
+
     camera.fov = glm::vec2(fovx, fovy);
 
     camera.view = glm::normalize(camera.lookAt - camera.position);

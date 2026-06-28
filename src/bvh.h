@@ -65,4 +65,7 @@ class BVH {
     LinearBVHNode *nodes = nullptr;
 
     BVH(vector<Triangle> &tris, int _maxPrimsInNode = 1);
+    ~BVH();
+
+    void freeLinearBVHTree();
 };

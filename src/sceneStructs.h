@@ -106,23 +106,32 @@ struct alignas(32) LinearBVHNode {
 struct Geom {
     enum GeomType type;
 
+    // TODO: union by itself is not going to reduce the size of Geom. Need to
+    // create 2 separate arrays to pass into the GPU (i.e. 1 for simple geo 1
+    // for mesh).
+    union {
+        struct {
+            int numTriangles;
+            Triangle *triangles;    // Host-side pointer
+            Triangle *devTriangles; // Device-side pointer
+        } geometry;
+    };
+
+    struct {
+        glm::vec3 translation;
+        glm::vec3 rotation;
+        glm::vec3 scale;
+        glm::mat4 transform;
+        glm::mat4 inverseTransform;
+        glm::mat4 invTranspose;
+    } transform;
+
     struct {
         int materialid;
         int albedoTextureID;
         int normalTextureID;
         int bumpTextureID;
     } material;
-    int numTriangles = 0;
-
-    Triangle *triangles;    // Host-side pointer
-    Triangle *devTriangles; // Device-side pointer
-
-    glm::vec3 translation;
-    glm::vec3 rotation;
-    glm::vec3 scale;
-    glm::mat4 transform;
-    glm::mat4 inverseTransform;
-    glm::mat4 invTranspose;
 };
 
 struct Material {

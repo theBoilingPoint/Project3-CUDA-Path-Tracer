@@ -32,6 +32,8 @@ BVH::BVH(vector<Triangle> &tris, int _maxPrimsInNode)
     initialize(tris);
 }
 
+BVH::~BVH() { freeLinearBVHTree(); }
+
 void BVH::initialize(vector<Triangle> &tris) {
     vector<BVHTriangle> bvhTriangles(tris.size());
     for (int i = 0; i < tris.size(); ++i) {
@@ -223,6 +225,14 @@ int BVH::flattenBVH(BVHNode *node, int *offset) {
     }
 
     return nodeOffset;
+}
+
+// Frees the host-side linear node array. Call this once the array has been
+// copied to the device (or when the BVH is no longer needed on the host).
+// Safe to call multiple times.
+void BVH::freeLinearBVHTree() {
+    delete[] nodes;
+    nodes = nullptr;
 }
 
 // Recursively frees the temporary BVHNode tree built by buildBVH once it has
