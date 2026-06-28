@@ -5,6 +5,16 @@ set ROOT=%~dp0..
 set BUILD_DIR=%ROOT%\build
 set NINJA_DIR=%ROOT%\build_ninja
 
+:: --- Ensure submodules are initialized ---
+:: OIDN additionally needs its nested submodules: weights (trained models) and
+:: external/cutlass (CUDA backend). composable_kernel (AMD/HIP) is intentionally
+:: skipped since we only build the CUDA device.
+git -C "%ROOT%" submodule update --init
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+
+git -C "%ROOT%\libs\oidn" submodule update --init weights external/cutlass
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+
 :: --- Main build (Visual Studio) ---
 cmake -S "%ROOT%" -B "%BUILD_DIR%" -G "Visual Studio 18 2026"
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%

@@ -152,6 +152,21 @@ source_group("tinygltf\\Sources" FILES ${tinygltf_sources})
 #add_subdirectory(src/ImGui)
 add_subdirectory(stream_compaction)  # TODO: uncomment if using your stream compaction
 
+# ----------------------------------------------------------------------------
+# Intel Open Image Denoise (OIDN) — built from the libs/oidn submodule.
+# CUDA-only device build: this avoids the ISPC compiler and TBB, which are only
+# required by OIDN's CPU device. Needs only the CUDA toolkit + CUTLASS (already
+# pulled in as a nested submodule under libs/oidn/external/cutlass).
+# Note: the CUTLASS kernels make the first build significantly slower.
+# ----------------------------------------------------------------------------
+option(USE_OIDN "Enable Intel Open Image Denoise" ON)
+if(USE_OIDN)
+    set(OIDN_DEVICE_CPU  OFF CACHE BOOL "" FORCE)
+    set(OIDN_DEVICE_CUDA ON  CACHE BOOL "" FORCE)
+    set(OIDN_APPS        OFF CACHE BOOL "" FORCE)
+    add_subdirectory(libs/oidn)
+endif()
+
 add_executable(${CMAKE_PROJECT_NAME} ${sources} ${headers} ${imgui_sources} ${imgui_headers})
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 if(CMAKE_VERSION VERSION_LESS "3.23.0")
@@ -167,6 +182,26 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     cudadevrt
     stream_compaction  # TODO: uncomment if using your stream compaction
     )
+if(USE_OIDN)
+    # OpenImageDenoise carries its own INTERFACE include dirs, so
+    # #include <OpenImageDenoise/oidn.hpp> works without extra paths.
+    target_link_libraries(${CMAKE_PROJECT_NAME} OpenImageDenoise)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE USE_OIDN)
+
+    # OIDN emits its DLLs into its own binary dir (build/libs/oidn), not next to
+    # the exe. The CUDA device module is built as an ExternalProject and is loaded
+    # dynamically at runtime (not a link dependency), so force it to build and copy
+    # all OIDN runtime DLLs next to the path tracer so they're found at launch.
+    add_dependencies(${CMAKE_PROJECT_NAME} OpenImageDenoise_device_cuda)
+    if(WIN32)
+        add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND}
+                -DOIDN_BIN_DIR=${CMAKE_BINARY_DIR}/libs/oidn
+                -DDST_DIR=$<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>
+                -P ${CMAKE_SOURCE_DIR}/cmake/copy_oidn_dlls.cmake
+            COMMENT "Copying OIDN runtime DLLs next to the path tracer")
+    endif()
+endif()
 target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE "$<$<AND:$<CONFIG:Debug,RelWithDebInfo>,$<COMPILE_LANGUAGE:CUDA>>:-G;-src-in-ptx>")
 target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-lineinfo;-src-in-ptx>")
 target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>")

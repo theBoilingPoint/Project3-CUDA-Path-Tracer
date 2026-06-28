@@ -17,3 +17,6 @@
 [submodule "libs/stb"]
 	path = libs/stb
 	url = https://github.com/nothings/stb
+[submodule "libs/oidn"]
+	path = libs/oidn
+	url = https://github.com/RenderKit/oidn.git
