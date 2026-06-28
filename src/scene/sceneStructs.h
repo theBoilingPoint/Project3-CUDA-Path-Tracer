@@ -103,39 +103,49 @@ struct alignas(32) LinearBVHNode {
     uint8_t axis;         // interior node: xyz
 };
 
+// Host-only owner of a mesh geom's CPU-side triangle and flattened-BVH arrays.
+// The Scene owns one of these per geom (parallel to `geoms`); they are uploaded
+// to the device during pathtraceInit and then freed. The device-facing Geom
+// below only carries the device pointers the kernel actually dereferences.
+struct MeshData {
+    int numTriangles = 0;
+    Triangle *triangles = nullptr; // Host-side triangles (BVH-ordered)
+    int numNodes = 0;
+    LinearBVHNode *nodes = nullptr; // Host-side flattened BVH
+};
+
+// Indices into the scene's material and texture arrays, shared by Geom and
+// ShadeableIntersection. A texture index of -1 means "no texture".
+struct MaterialIDs {
+    int materialId;
+    int albedoTextureID;
+    int normalTextureID;
+    int bumpTextureID;
+};
+
+// Device-facing geometry record. Holds only what the intersection kernels
+// actually read: the type tag, the mesh device pointers (dereferenced only when
+// type == MESH), the transform matrices, and the material/texture indices.
+// translation/rotation/scale are build-time inputs to the matrices and are kept
+// local at scene-load time (see scene.cpp) rather than stored here.
 struct Geom {
     enum GeomType type;
 
-    // TODO: union by itself is not going to reduce the size of Geom. Need to
-    // create 2 separate arrays to pass into the GPU (i.e. 1 for simple geo 1
-    // for mesh).
-    union {
-        struct {
-            int numTriangles;
-            Triangle *triangles;    // Host-side pointer
-            Triangle *devTriangles; // Device-side pointer
-
-            int numNodes;
-            LinearBVHNode *nodes;    // Host-side flattened BVH
-            LinearBVHNode *devNodes; // Device-side flattened BVH
-        } geometry;
-    };
+    // Mesh-only device pointers. Sphere/cube don't use these, but all geoms
+    // share one array so the fields are present on every element.
+    struct {
+        int numTriangles;        // Used by the naive (non-BVH) traversal
+        Triangle *devTriangles;  // Device-side triangles
+        LinearBVHNode *devNodes; // Device-side flattened BVH
+    } geometry;
 
     struct {
-        glm::vec3 translation;
-        glm::vec3 rotation;
-        glm::vec3 scale;
         glm::mat4 transform;
         glm::mat4 inverseTransform;
         glm::mat4 invTranspose;
     } transform;
 
-    struct {
-        int materialid;
-        int albedoTextureID;
-        int normalTextureID;
-        int bumpTextureID;
-    } material;
+    MaterialIDs material;
 };
 
 struct Material {
@@ -148,9 +158,13 @@ struct Material {
 };
 
 /****** For Texture Loading ******/
+// Device-side texture handle. Deliberately minimal: an array of these is
+// uploaded to the GPU and indexed once per shading sample, so it carries only
+// what the device actually uses — the hardware texture object. The backing
+// cudaArray and other host-only handles needed to release the texture live
+// host-side in TextureResource (pathtrace.cu) instead of bloating this struct.
 struct Texture {
-    glm::ivec2 size;
-    glm::vec4 *dev_data;
+    cudaTextureObject_t texObj;
 };
 
 struct TextureValues {
@@ -199,10 +213,5 @@ struct ShadeableIntersection {
     glm::vec3 surfaceNormal;
     glm::vec3 surfaceTangent; // World-space UV tangent (zero if unavailable)
     glm::vec2 uv;
-    struct {
-        int materialId;
-        int albedoTextureID;
-        int normalTextureID;
-        int bumpTextureID;
-    } materials;
+    MaterialIDs materials;
 };

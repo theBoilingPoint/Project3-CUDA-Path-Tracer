@@ -52,6 +52,11 @@ class Scene {
 
     vector<Geom> geoms;
     vector<Geom> lights;
+    // Host-side mesh arrays, parallel to `geoms`/`lights`. `geomMeshData` owns
+    // the arrays; `lightMeshData` holds non-owning copies (lights are copies of
+    // geoms), so only `geomMeshData` is freed.
+    vector<MeshData> geomMeshData;
+    vector<MeshData> lightMeshData;
     vector<Material> materials;
     vector<tuple<glm::vec4 *, glm::ivec2>> albedoTextures;
     vector<tuple<glm::vec4 *, glm::ivec2>> normalTextures;

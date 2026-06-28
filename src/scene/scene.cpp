@@ -55,19 +55,15 @@ Scene::~Scene() {
         }
     }
 
-    // Note: triangles should already be cleaned up by pathtraceFree
-    // Only clean them up here if pathtraceFree wasn't called.
-    // `geoms` is the sole owner of the triangle arrays. Light meshes are also
-    // pushed into `geoms`, so `lights` only holds shallow copies of those
-    // pointers - it must NOT free them or we double-free.
-    for (Geom &geom : geoms) {
-        Triangle *ptr = geom.geometry.triangles;
-        // Check for valid pointer (not nullptr and not obviously corrupted)
-        if (ptr != nullptr &&
-            ptr != reinterpret_cast<Triangle *>(0xFFFFFFFFFFFFFFFFULL)) {
-            delete[] ptr;
-            geom.geometry.triangles = nullptr;
-        }
+    // Note: the host mesh arrays should already be cleaned up by pathtraceFree;
+    // only free them here if pathtraceFree wasn't called. `geomMeshData` is the
+    // sole owner (`lightMeshData` holds non-owning copies), so we free only it.
+    // delete[] on nullptr is a no-op, so double cleanup is safe.
+    for (MeshData &md : geomMeshData) {
+        delete[] md.triangles;
+        md.triangles = nullptr;
+        delete[] md.nodes;
+        md.nodes = nullptr;
     }
 }
 
@@ -266,14 +262,12 @@ void Scene::loadFromJSON(const std::string &jsonName) {
         newGeom.material.normalTextureID = -1;
         newGeom.material.bumpTextureID = -1;
 
-        // Initialize triangles pointer to nullptr to avoid deleting garbage
-        // pointers
-        newGeom.geometry.triangles = nullptr;
-        newGeom.geometry.devTriangles = nullptr;
+        // Device pointers are filled in during upload (pathtraceInit).
+        // Host-side mesh arrays live in newMeshData (empty for non-mesh geoms).
         newGeom.geometry.numTriangles = 0;
-        newGeom.geometry.nodes = nullptr;
+        newGeom.geometry.devTriangles = nullptr;
         newGeom.geometry.devNodes = nullptr;
-        newGeom.geometry.numNodes = 0;
+        MeshData newMeshData;
 
         if (type == "cube") {
             newGeom.type = CUBE;
@@ -315,20 +309,20 @@ void Scene::loadFromJSON(const std::string &jsonName) {
             }
 
             newGeom.geometry.numTriangles = static_cast<int>(numTriangles);
-            // Own a heap-allocated copy of the triangles. The Scene destructor
-            // frees this with delete[], so it must be a new[] block and must
-            // outlive the local `bvh` (whose vector buffer is freed at the end
-            // of this scope).
-            newGeom.geometry.triangles = new Triangle[numTriangles];
-            std::copy(bvh.triangles.begin(), bvh.triangles.end(),
-                      newGeom.geometry.triangles);
 
-            // Own a heap-allocated copy of the flattened BVH nodes (same
-            // ownership reasoning as the triangles above).
-            newGeom.geometry.numNodes = bvh.numNodes;
-            newGeom.geometry.nodes = new LinearBVHNode[bvh.numNodes];
-            std::copy(bvh.nodes, bvh.nodes + bvh.numNodes,
-                      newGeom.geometry.nodes);
+            // Host-side arrays live in MeshData, owned by the Scene. We keep a
+            // heap-allocated copy (freed with delete[]) that outlives the local
+            // `bvh` (whose vector buffer is freed at the end of this scope).
+            newMeshData.numTriangles = static_cast<int>(numTriangles);
+            newMeshData.triangles = new Triangle[numTriangles];
+            std::copy(bvh.triangles.begin(), bvh.triangles.end(),
+                      newMeshData.triangles);
+
+            // Heap-allocated copy of the flattened BVH nodes (same ownership
+            // reasoning as the triangles above).
+            newMeshData.numNodes = bvh.numNodes;
+            newMeshData.nodes = new LinearBVHNode[bvh.numNodes];
+            std::copy(bvh.nodes, bvh.nodes + bvh.numNodes, newMeshData.nodes);
 
             numOfFaces += numTriangles;
 
@@ -407,26 +401,32 @@ void Scene::loadFromJSON(const std::string &jsonName) {
 #endif
         }
 
-        newGeom.material.materialid = MatNameToID[mat];
+        newGeom.material.materialId = MatNameToID[mat];
 
         const auto &trans = p["TRANS"];
         const auto &rotat = p["ROTAT"];
         const auto &scale = p["SCALE"];
 
-        newGeom.transform.translation = glm::vec3(trans[0], trans[1], trans[2]);
-        newGeom.transform.rotation = glm::vec3(rotat[0], rotat[1], rotat[2]);
-        newGeom.transform.scale = glm::vec3(scale[0], scale[1], scale[2]);
+        // translation/rotation/scale are only build-time inputs to the
+        // transform matrices, so they stay local and are not stored on Geom
+        // (the device never reads them).
+        glm::vec3 translation(trans[0], trans[1], trans[2]);
+        glm::vec3 rotation(rotat[0], rotat[1], rotat[2]);
+        glm::vec3 scaling(scale[0], scale[1], scale[2]);
         newGeom.transform.transform = utilityCore::buildTransformationMatrix(
-            newGeom.transform.translation, newGeom.transform.rotation,
-            newGeom.transform.scale);
+            translation, rotation, scaling);
         newGeom.transform.inverseTransform =
             glm::inverse(newGeom.transform.transform);
         newGeom.transform.invTranspose =
             glm::inverseTranspose(newGeom.transform.transform);
 
         geoms.push_back(newGeom);
+        geomMeshData.push_back(newMeshData);
         if (mat == "light") {
             lights.push_back(newGeom);
+            // Non-owning copy: shares geomMeshData's host pointers (freed once,
+            // via geomMeshData).
+            lightMeshData.push_back(newMeshData);
         }
     }
 

@@ -60,37 +60,40 @@ if(EXISTS "${CUDA_ROOT}/include/cccl")
 endif()
 
 set(headers
-    src/main.h
-    src/image.h
-    src/interactions.h
-    src/intersections.h
-    src/glslUtility.hpp
-    src/pathtrace.h
-    src/scene.h
-    src/sceneStructs.h
-    src/preview.h
-    src/utilities.h
-    src/warp.h
-    src/bsdf.h
-    src/meshLoader.h
-    src/bvh.h
+    src/core/main.h
+    src/core/utilities.h
+    src/core/cudaUtil.h
+    src/scene/scene.h
+    src/scene/sceneStructs.h
+    src/scene/meshLoader.h
+    src/scene/bvh.h
+    src/render/pathtrace.h
+    src/render/deviceScene.h
+    src/render/intersections.h
+    src/render/interactions.h
+    src/render/bsdf.h
+    src/render/warp.h
+    src/display/preview.h
+    src/display/glslUtility.hpp
+    src/display/image.h
 )
 
 set(sources
-    src/main.cpp
-    src/stb.cpp
-    src/image.cpp
-    src/glslUtility.cpp
-    src/pathtrace.cu
-    src/intersections.cu
-    src/interactions.cu
-    src/scene.cpp
-    src/preview.cpp
-    src/utilities.cpp
-    src/warp.cu
-    src/bsdf.cu
-    src/meshLoader.cpp
-    src/bvh.cpp
+    src/core/main.cpp
+    src/core/utilities.cpp
+    src/scene/scene.cpp
+    src/scene/meshLoader.cpp
+    src/scene/bvh.cpp
+    src/render/pathtrace.cu
+    src/render/deviceScene.cu
+    src/render/intersections.cu
+    src/render/interactions.cu
+    src/render/warp.cu
+    src/render/bsdf.cu
+    src/display/preview.cpp
+    src/display/glslUtility.cpp
+    src/display/image.cpp
+    src/display/stb.cpp
 )
 
 set(imgui_headers
@@ -177,6 +180,14 @@ else()
     set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CUDA_ARCHITECTURES native)
 endif()
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/libs ${CMAKE_SOURCE_DIR}/libs/ImGui)
+# src subfolders so the project's flat #include "foo.h" resolve regardless of
+# which subfolder a file now lives in.
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/scene
+    ${CMAKE_SOURCE_DIR}/src/render
+    ${CMAKE_SOURCE_DIR}/src/display
+)
 target_link_libraries(${CMAKE_PROJECT_NAME}
     ${LIBRARIES}
     cudadevrt
