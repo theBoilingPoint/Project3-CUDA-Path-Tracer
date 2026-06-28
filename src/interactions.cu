@@ -7,6 +7,7 @@ __host__ __device__ void scatterRay(
     PathSegment & pathSegment,
     glm::vec3 woW,
     glm::vec3 normal, // Here normal is in world space
+    glm::vec3 tangent, // World-space UV tangent (zero if unavailable)
     glm::vec3 &wiW,
     float &pdf,
     glm::vec3 &c,
@@ -34,24 +35,38 @@ __host__ __device__ void scatterRay(
     glm::vec3 actualAlbedo = m.color;
     glm::vec3 actualNormal = normal;
 
+    // Build a UV-aligned TBN for normal/bump mapping. Tangent-space maps assume
+    // +X follows increasing U and +Y increasing V, which the BSDF's arbitrary
+    // frame does not. Gram-Schmidt the tangent against the (face-forwarded)
+    // normal; fall back to the BSDF frame when no UV tangent exists (e.g. cubes
+    // and spheres, which pass a zero tangent).
+    glm::mat3 tbn = localToWorld;
+    if (glm::dot(tangent, tangent) > 1e-12f) {
+        glm::vec3 T = tangent - normal * glm::dot(normal, tangent);
+        if (glm::dot(T, T) > 1e-12f) {
+            T = glm::normalize(T);
+            glm::vec3 B = glm::cross(normal, T);
+            tbn = glm::mat3(T, B, normal);
+        }
+    }
+
     // TODO: mind the divergence here
     if (texVals.albedo != glm::vec4(INFINITY)) {
         actualAlbedo = glm::vec3(texVals.albedo);
     }
-    
+
     if (texVals.normal != glm::vec4(INFINITY)) {
         glm::vec3 texNormal = glm::normalize(glm::vec3(texVals.normal));
-        actualNormal = glm::normalize(localToWorld * texNormal);
+        actualNormal = glm::normalize(tbn * texNormal);
     }
 
     if (texVals.bump != glm::vec4(INFINITY)) {
         float du = texVals.bump.x;
         float dv = texVals.bump.y;
-        glm::vec3 tangent = localToWorld[0];
-        glm::vec3 bitangent = localToWorld[1];
 
-        // Perturb the normal using the bump map derivatives du and dv
-        actualNormal = glm::normalize(actualNormal + du * tangent + dv * bitangent);
+        // Perturb the normal along the UV-aligned tangent/bitangent.
+        actualNormal =
+            glm::normalize(actualNormal + du * tbn[0] + dv * tbn[1]);
     }
 
     // note: this is where sorting the intersections by material is going to come in very handy

@@ -26,7 +26,7 @@
 #define USE_STREAM_COMPACTION 1
 #define USE_MATERIAL_SORT 1
 #define USE_RUSSIAN_ROULETTE 1
-#define USE_BVH 0
+#define USE_BVH 1
 
 // Visual Improvements
 #define USE_ANTIALIASING 1
@@ -47,6 +47,8 @@ static Geom *dev_geoms = NULL;
 static Geom *dev_lights = NULL;
 static Triangle *dev_geomTriangles = NULL;
 static Triangle *dev_lightTriangles = NULL;
+static LinearBVHNode *dev_geomBVHNodes = NULL;
+static LinearBVHNode *dev_lightBVHNodes = NULL;
 static int *dev_totalNumberOfLights = NULL;
 
 static PathSegment *dev_paths = NULL;
@@ -116,16 +118,23 @@ __global__ void sendImageToPBO(uchar4 *pbo, glm::ivec2 resolution, int iter,
 
 void InitDataContainer(GuiDataContainer *imGuiData) { guiData = imGuiData; }
 
-void initialiseTriangles(Triangle *dev_triangles, std::vector<Geom> &geometries,
+// Uploads each mesh geom's triangles and flattened BVH nodes to the device,
+// concatenated into one big array each, and points the per-geom device pointers
+// into them. The device pointers are taken by reference so the caller's globals
+// are set (and thus freeable).
+void initialiseTriangles(Triangle *&dev_triangles, LinearBVHNode *&dev_nodes,
+                         std::vector<Geom> &geometries,
                          const int totalNumberOfGeom) {
     if (totalNumberOfGeom == 0) {
         return;
     }
 
     int totalNumberOfTriangles = 0;
+    int totalNumberOfNodes = 0;
     for (int i = 0; i < totalNumberOfGeom; i++) {
         if (geometries[i].type == MESH) {
             totalNumberOfTriangles += geometries[i].geometry.numTriangles;
+            totalNumberOfNodes += geometries[i].geometry.numNodes;
         }
     }
 
@@ -134,20 +143,28 @@ void initialiseTriangles(Triangle *dev_triangles, std::vector<Geom> &geometries,
     }
 
     cudaMalloc(&dev_triangles, totalNumberOfTriangles * sizeof(Triangle));
-    int offset = 0;
+    cudaMalloc(&dev_nodes, totalNumberOfNodes * sizeof(LinearBVHNode));
+    int triOffset = 0;
+    int nodeOffset = 0;
     for (int i = 0; i < totalNumberOfGeom; i++) {
         if (geometries[i].type == MESH) {
             // Copy each geometry's triangles to the device memory
-            cudaMemcpy(dev_triangles + offset, geometries[i].geometry.triangles,
+            cudaMemcpy(dev_triangles + triOffset,
+                       geometries[i].geometry.triangles,
                        geometries[i].geometry.numTriangles * sizeof(Triangle),
                        cudaMemcpyHostToDevice);
+            geometries[i].geometry.devTriangles = dev_triangles + triOffset;
+            triOffset += geometries[i].geometry.numTriangles;
 
-            // Update the device pointer in the geometry struct to point to
-            // device memory
-            geometries[i].geometry.devTriangles = dev_triangles + offset;
-
-            // Move the offset by the number of triangles in this geometry
-            offset += geometries[i].geometry.numTriangles;
+            // Copy each geometry's flattened BVH nodes to the device memory.
+            // Leaf primitivesOffset / interior secondChildOffset are relative
+            // to this mesh's own arrays, so the per-mesh base pointer is
+            // correct.
+            cudaMemcpy(dev_nodes + nodeOffset, geometries[i].geometry.nodes,
+                       geometries[i].geometry.numNodes * sizeof(LinearBVHNode),
+                       cudaMemcpyHostToDevice);
+            geometries[i].geometry.devNodes = dev_nodes + nodeOffset;
+            nodeOffset += geometries[i].geometry.numNodes;
         }
     }
 }
@@ -239,7 +256,7 @@ void pathtraceInit(Scene *scene) {
 
     int totalNumberOfGeom = scene->geoms.size();
     initialiseTriangles(
-        dev_geomTriangles, scene->geoms,
+        dev_geomTriangles, dev_geomBVHNodes, scene->geoms,
         totalNumberOfGeom); // Must appear before initializing dev_geoms
     cudaMalloc(&dev_geoms, totalNumberOfGeom * sizeof(Geom));
     cudaMemcpy(dev_geoms, scene->geoms.data(),
@@ -247,7 +264,7 @@ void pathtraceInit(Scene *scene) {
 
     int totalNumberOfLights = scene->lights.size();
     initialiseTriangles(
-        dev_lightTriangles, scene->lights,
+        dev_lightTriangles, dev_lightBVHNodes, scene->lights,
         totalNumberOfLights); // Must appear before initializing dev_lights
     cudaMalloc(&dev_lights, totalNumberOfLights * sizeof(Geom));
     cudaMemcpy(dev_lights, scene->lights.data(),
@@ -256,20 +273,28 @@ void pathtraceInit(Scene *scene) {
     cudaMemcpy(dev_totalNumberOfLights, &totalNumberOfLights, sizeof(int),
                cudaMemcpyHostToDevice);
 
-    // We've already got the triangles in the device memory, so we can delete
-    // them from the host memory
+    // We've already got the triangles and BVH nodes in the device memory, so we
+    // can delete them from the host memory
     for (Geom &geom : scene->geoms) {
         if (geom.geometry.triangles != nullptr) {
             delete[] geom.geometry.triangles;
             geom.geometry.triangles = nullptr;
         }
+        if (geom.geometry.nodes != nullptr) {
+            delete[] geom.geometry.nodes;
+            geom.geometry.nodes = nullptr;
+        }
     }
 
-    // Also clean up lights triangles if they have any
+    // Also clean up lights triangles/nodes if they have any
     for (Geom &light : scene->lights) {
         if (light.geometry.triangles != nullptr) {
             delete[] light.geometry.triangles;
             light.geometry.triangles = nullptr;
+        }
+        if (light.geometry.nodes != nullptr) {
+            delete[] light.geometry.nodes;
+            light.geometry.nodes = nullptr;
         }
     }
 
@@ -313,6 +338,8 @@ void pathtraceFree() {
     cudaFree(dev_lights);
     cudaFree(dev_geomTriangles);
     cudaFree(dev_lightTriangles);
+    cudaFree(dev_geomBVHNodes);
+    cudaFree(dev_lightBVHNodes);
     cudaFree(dev_totalNumberOfLights);
     cudaFree(dev_materials);
     cudaFree(dev_intersections);
@@ -427,6 +454,7 @@ __global__ void computeIntersections(int depth, int num_paths,
         float t;
         glm::vec3 intersect_point;
         glm::vec3 normal;
+        glm::vec3 tangent;
         glm::vec2 uv;
         float t_min = FLT_MAX;
         int hit_geom_index = -1;
@@ -434,11 +462,16 @@ __global__ void computeIntersections(int depth, int num_paths,
 
         glm::vec3 tmp_intersect;
         glm::vec3 tmp_normal;
+        glm::vec3 tmp_tangent;
         glm::vec2 tmp_uv;
 
         // naive parse through global geoms
         for (int i = 0; i < geoms_size; i++) {
             Geom &geom = geoms[i];
+
+            // Box/sphere don't provide a UV tangent; zero it so a stale mesh
+            // tangent from a previous geom isn't reused.
+            tmp_tangent = glm::vec3(0.0f);
 
             if (geom.type == CUBE) {
                 t = boxIntersectionTest(geom, pathSegment.ray, tmp_intersect,
@@ -448,11 +481,13 @@ __global__ void computeIntersections(int depth, int num_paths,
                                            tmp_normal, outside);
             } else if (geom.type == MESH) {
 #if USE_BVH
-                t = meshIntersectionTestBVH();
+                t = meshIntersectionTestBVH(geom, pathSegment.ray,
+                                            tmp_intersect, tmp_normal,
+                                            tmp_tangent, tmp_uv, outside);
 #else
                 t = meshIntersectionTestNaive(geom, pathSegment.ray,
-                                              tmp_intersect, tmp_normal, tmp_uv,
-                                              outside);
+                                              tmp_intersect, tmp_normal,
+                                              tmp_tangent, tmp_uv, outside);
 #endif
             }
 
@@ -463,6 +498,7 @@ __global__ void computeIntersections(int depth, int num_paths,
                 hit_geom_index = i;
                 intersect_point = tmp_intersect;
                 normal = tmp_normal;
+                tangent = tmp_tangent;
                 uv = tmp_uv;
             }
         }
@@ -483,6 +519,7 @@ __global__ void computeIntersections(int depth, int num_paths,
                 hitGeom.material.bumpTextureID;
 
             intersections[path_index].surfaceNormal = normal;
+            intersections[path_index].surfaceTangent = tangent;
             intersections[path_index].uv = uv;
         }
     }
@@ -499,37 +536,26 @@ __device__ glm::vec4 sampleTexture(Texture texture, glm::vec2 uv,
         return val; // Regular texture sampling if not a bump map
     }
 
-    // If it's a bump map, calculate du and dv using finite differences
-    float epsilon =
-        1.0f / texture.size.x; // Small step, inverse of texture width
+    // Bump map: finite-difference the height (R channel) against the adjacent
+    // texels. We use the per-texel height *difference* directly (NOT divided by
+    // a sub-texel epsilon, which previously scaled the slope by the texture
+    // width and blew up the perturbation). bumpStrength tunes the effect.
+    const float bumpStrength = 1.0f;
 
-    // Sample neighboring texels for finite difference
-    int xPlus = static_cast<int>((uv.x + epsilon) * (texture.size.x - 1));
-    int yPlus = static_cast<int>((uv.y + epsilon) * (texture.size.y - 1));
+    // Neighboring texels, clamped to stay in bounds.
+    int xPlus = min(x + 1, texture.size.x - 1);
+    int yPlus = min(y + 1, texture.size.y - 1);
 
-    // Ensure we stay within texture bounds
-    xPlus = min(xPlus, texture.size.x - 1);
-    yPlus = min(yPlus, texture.size.y - 1);
-
-    // Indices for neighboring texels
-    int idxXPlus = y * texture.size.x + xPlus;
-    int idxYPlus = yPlus * texture.size.x + x;
-
-    // Access neighboring texels
     float height = val.r; // Current height (R channel for bump)
-    float heightXPlus =
-        texture.dev_data[idxXPlus].r; // Height at (u + epsilon, v)
-    float heightYPlus =
-        texture.dev_data[idxYPlus].r; // Height at (u, v + epsilon)
+    float heightXPlus = texture.dev_data[y * texture.size.x + xPlus].r;
+    float heightYPlus = texture.dev_data[yPlus * texture.size.x + x].r;
 
-    // Compute finite differences (du, dv)
-    float du = (heightXPlus - height) / epsilon;
-    float dv = (heightYPlus - height) / epsilon;
+    // Height slope in u and v, in [-1, 1] * bumpStrength.
+    float du = (heightXPlus - height) * bumpStrength;
+    float dv = (heightYPlus - height) * bumpStrength;
 
-    // Return the du and dv as a vec4 for further processing
-    // You can store du in the R channel and dv in the G channel
-    return glm::vec4(du, dv, 0.0f,
-                     0.0f); // Return du, dv for normal perturbation
+    // Store du in R and dv in G for the normal perturbation in scatterRay.
+    return glm::vec4(du, dv, 0.0f, 0.0f);
 }
 
 __device__ glm::vec3 checkerboard(float u, float v, int checkerSize) {
@@ -622,14 +648,15 @@ __global__ void shade(int iter, int depth, int num_paths,
 
         glm::vec3 oldIntersect = getPointOnRay(pathSegment.ray, intersection.t);
         glm::vec3 surfaceNormal = glm::normalize(intersection.surfaceNormal);
+        glm::vec3 surfaceTangent = intersection.surfaceTangent;
         glm::vec3 woW = -pathSegment.ray.direction;
         glm::vec3 wiW;
         glm::vec3 c;
         float pdf;
         float eta;
 
-        scatterRay(pathSegment, woW, surfaceNormal, wiW, pdf, c, eta, material,
-                   texVals, rng);
+        scatterRay(pathSegment, woW, surfaceNormal, surfaceTangent, wiW, pdf, c,
+                   eta, material, texVals, rng);
 
         pathSegment.ray.direction = wiW; // wiW should already be normalized
         // Without the offset, when the ray immediately intersects the surface

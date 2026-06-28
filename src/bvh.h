@@ -63,9 +63,17 @@ class BVH {
     // TODO: Remember to clean up this nodes pointer on the host side once it's
     // copied to the device
     LinearBVHNode *nodes = nullptr;
+    int numNodes = 0;
 
     BVH(vector<Triangle> &tris, int _maxPrimsInNode = 1);
     ~BVH();
+
+    // BVH owns `nodes` (a raw new[] array). Forbid copying to avoid a
+    // double-free; allow moving so it can be returned / stored by value.
+    BVH(const BVH &) = delete;
+    BVH &operator=(const BVH &) = delete;
+    BVH(BVH &&other) noexcept;
+    BVH &operator=(BVH &&other) noexcept;
 
     void freeLinearBVHTree();
 };

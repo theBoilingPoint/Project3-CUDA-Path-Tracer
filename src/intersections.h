@@ -77,4 +77,17 @@ __host__ __device__ float sphereIntersectionTest(Geom sphere, Ray r,
  */
 __host__ __device__ float
 meshIntersectionTestNaive(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
-                          glm::vec3 &normal, glm::vec2 &uv, bool &outside);
+                          glm::vec3 &normal, glm::vec3 &tangent, glm::vec2 &uv,
+                          bool &outside);
+
+/**
+ * @brief Test intersection between a ray and a mesh by traversing the mesh's
+ * flattened BVH. Populates the same outputs as meshIntersectionTestNaive.
+ *
+ * @return float World-space distance to the hit. -1 if no intersection.
+ */
+__host__ __device__ float meshIntersectionTestBVH(Geom mesh, Ray r,
+                                                  glm::vec3 &intersectionPoint,
+                                                  glm::vec3 &normal,
+                                                  glm::vec3 &tangent,
+                                                  glm::vec2 &uv, bool &outside);

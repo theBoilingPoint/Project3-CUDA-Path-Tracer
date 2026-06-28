@@ -56,7 +56,10 @@ Scene::~Scene() {
     }
 
     // Note: triangles should already be cleaned up by pathtraceFree
-    // Only clean them up here if pathtraceFree wasn't called
+    // Only clean them up here if pathtraceFree wasn't called.
+    // `geoms` is the sole owner of the triangle arrays. Light meshes are also
+    // pushed into `geoms`, so `lights` only holds shallow copies of those
+    // pointers - it must NOT free them or we double-free.
     for (Geom &geom : geoms) {
         Triangle *ptr = geom.geometry.triangles;
         // Check for valid pointer (not nullptr and not obviously corrupted)
@@ -64,14 +67,6 @@ Scene::~Scene() {
             ptr != reinterpret_cast<Triangle *>(0xFFFFFFFFFFFFFFFFULL)) {
             delete[] ptr;
             geom.geometry.triangles = nullptr;
-        }
-    }
-    for (Geom &light : lights) {
-        Triangle *ptr = light.geometry.triangles;
-        if (ptr != nullptr &&
-            ptr != reinterpret_cast<Triangle *>(0xFFFFFFFFFFFFFFFFULL)) {
-            delete[] ptr;
-            light.geometry.triangles = nullptr;
         }
     }
 }
@@ -224,7 +219,13 @@ void Scene::loadFromJSON(const std::string &jsonName) {
             exit(-1);
         }
 
-        const auto &filepath = p["TEXTURE_PATH"];
+        // Resolve the texture path relative to the scene JSON file rather than
+        // the process working directory, so relative paths stay portable.
+        std::filesystem::path texPath(p["TEXTURE_PATH"].get<std::string>());
+        if (texPath.is_relative()) {
+            texPath = std::filesystem::path(jsonName).parent_path() / texPath;
+        }
+        std::string filepath = texPath.string();
         glm::vec4 *curTexture;
         glm::ivec2 textureSize;
         loadTexture(filepath, textureType, curTexture, textureSize);
@@ -270,6 +271,9 @@ void Scene::loadFromJSON(const std::string &jsonName) {
         newGeom.geometry.triangles = nullptr;
         newGeom.geometry.devTriangles = nullptr;
         newGeom.geometry.numTriangles = 0;
+        newGeom.geometry.nodes = nullptr;
+        newGeom.geometry.devNodes = nullptr;
+        newGeom.geometry.numNodes = 0;
 
         if (type == "cube") {
             newGeom.type = CUBE;
@@ -294,8 +298,8 @@ void Scene::loadFromJSON(const std::string &jsonName) {
             Mesh newMesh;
             loadMesh(filepath, newMesh);
 
-            printf("Loaded mesh with %d vertices, %d normals, %d faces, %d "
-                   "indices, %d uvs\n",
+            printf("Loaded mesh with %zu vertices, %zu normals, %zu faces, %zu "
+                   "indices, %zu uvs\n",
                    newMesh.verts.size(), newMesh.normals.size(),
                    newMesh.faces.size(), newMesh.indices.size(),
                    newMesh.uvs.size());
@@ -318,6 +322,13 @@ void Scene::loadFromJSON(const std::string &jsonName) {
             newGeom.geometry.triangles = new Triangle[numTriangles];
             std::copy(bvh.triangles.begin(), bvh.triangles.end(),
                       newGeom.geometry.triangles);
+
+            // Own a heap-allocated copy of the flattened BVH nodes (same
+            // ownership reasoning as the triangles above).
+            newGeom.geometry.numNodes = bvh.numNodes;
+            newGeom.geometry.nodes = new LinearBVHNode[bvh.numNodes];
+            std::copy(bvh.nodes, bvh.nodes + bvh.numNodes,
+                      newGeom.geometry.nodes);
 
             numOfFaces += numTriangles;
 
@@ -353,7 +364,7 @@ void Scene::loadFromJSON(const std::string &jsonName) {
             if (newMesh.albedoTextures.size() == 0) {
                 printf("No albedo texture found for the mesh object. \n");
             } else {
-                printf("%d albedo texture found for the mesh object. \n",
+                printf("%zu albedo texture found for the mesh object. \n",
                        newMesh.albedoTextures.size());
                 for (const auto &texture : newMesh.albedoTextures) {
                     std::string textureName = std::get<0>(texture);
@@ -368,7 +379,7 @@ void Scene::loadFromJSON(const std::string &jsonName) {
             if (newMesh.normalTextures.size() == 0) {
                 printf("No normal texture found for the mesh object. \n");
             } else {
-                printf("%d normal texture found for the mesh object. \n",
+                printf("%zu normal texture found for the mesh object. \n",
                        newMesh.normalTextures.size());
                 for (const auto &texture : newMesh.normalTextures) {
                     std::string textureName = std::get<0>(texture);
@@ -383,7 +394,7 @@ void Scene::loadFromJSON(const std::string &jsonName) {
             if (newMesh.bumpTextures.size() == 0) {
                 printf("No bump texture found for the mesh object. \n");
             } else {
-                printf("%d bump texture found for the mesh object. \n",
+                printf("%zu bump texture found for the mesh object. \n",
                        newMesh.bumpTextures.size());
                 for (const auto &texture : newMesh.bumpTextures) {
                     std::string textureName = std::get<0>(texture);

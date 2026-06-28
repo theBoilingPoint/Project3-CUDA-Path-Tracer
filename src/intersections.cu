@@ -105,15 +105,188 @@ __host__ __device__ float sphereIntersectionTest(Geom sphere, Ray r,
     return glm::length(r.origin - intersectionPoint);
 }
 
-__host__ __device__ float meshIntersectionTestBVH() { return -1; }
+// Slab test: does the ray (origin + t*dir, t in [0, tMax]) hit the AABB?
+// invDir = 1/dir per component; the sign handling is folded into the min/max
+// swap so dirIsNeg is not needed here.
+__host__ __device__ inline bool aabbIntersectP(const BoundingBox &b,
+                                               const glm::vec3 &origin,
+                                               const glm::vec3 &invDir,
+                                               float tMax) {
+    float t0 = 0.0f;
+    float t1 = tMax;
+    for (int i = 0; i < 3; ++i) {
+        float tNear = (b.min[i] - origin[i]) * invDir[i];
+        float tFar = (b.max[i] - origin[i]) * invDir[i];
+        if (tNear > tFar) {
+            float tmp = tNear;
+            tNear = tFar;
+            tFar = tmp;
+        }
+        t0 = tNear > t0 ? tNear : t0;
+        t1 = tFar < t1 ? tFar : t1;
+        if (t0 > t1) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Computes the model-local surface tangent for a triangle from its UV
+// gradients. The tangent points along +U in texture space, which is the frame
+// tangent-space normal/bump maps are authored against. Falls back to an edge
+// when the UVs are degenerate.
+__host__ __device__ inline glm::vec3
+computeTriangleTangent(const Triangle &tri) {
+    glm::vec3 e1 = tri.points[1] - tri.points[0];
+    glm::vec3 e2 = tri.points[2] - tri.points[0];
+    glm::vec2 duv1 = tri.uvs[1] - tri.uvs[0];
+    glm::vec2 duv2 = tri.uvs[2] - tri.uvs[0];
+    float det = duv1.x * duv2.y - duv2.x * duv1.y;
+    if (fabsf(det) < 1e-8f) {
+        return e1;
+    }
+    return (duv2.y * e1 - duv1.y * e2) / det;
+}
+
+__host__ __device__ float
+meshIntersectionTestBVH(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
+                        glm::vec3 &normal, glm::vec3 &tangent, glm::vec2 &uv,
+                        bool &outside) {
+    const LinearBVHNode *nodes = mesh.geometry.devNodes;
+    const Triangle *tris = mesh.geometry.devTriangles;
+    if (nodes == nullptr) {
+        return -1;
+    }
+
+    // The BVH (node bounds and triangles) lives in the mesh's local space, so
+    // we traverse there and only transform the final hit back to world space.
+    glm::vec3 originLocal =
+        multiplyMV(mesh.transform.inverseTransform, glm::vec4(r.origin, 1.0f));
+    glm::vec3 directionLocal = glm::normalize(multiplyMV(
+        mesh.transform.inverseTransform, glm::vec4(r.direction, 0.0f)));
+
+    glm::vec3 invDir(1.0f / directionLocal.x, 1.0f / directionLocal.y,
+                     1.0f / directionLocal.z);
+    int dirIsNeg[3] = {invDir.x < 0.0f, invDir.y < 0.0f, invDir.z < 0.0f};
+
+    // Closest hit so far, tracked in local-ray distance units (directionLocal
+    // is normalized, matching glm::intersectRayTriangle's hitDist).
+    float t = INFINITY;
+    glm::vec3 finalIntersectionPoint;
+    glm::vec3 finalNormal;
+    glm::vec3 finalTangent(0.0f);
+    glm::vec2 finalUV;
+    bool finalOutside = false;
+    bool hitAnything = false;
+
+    int toVisitOffset = 0;
+    int currentNodeIndex = 0;
+    int nodesToVisit[64];
+
+    while (true) {
+        const LinearBVHNode *node = &nodes[currentNodeIndex];
+        if (aabbIntersectP(node->bbox, originLocal, invDir, t)) {
+            if (node->nPrimitives > 0) {
+                // Leaf node: test each triangle.
+                for (int i = 0; i < node->nPrimitives; ++i) {
+                    const Triangle &tri = tris[node->primitivesOffset + i];
+
+                    glm::vec2 baryCoords;
+                    float hitDist;
+                    bool hit = glm::intersectRayTriangle(
+                        originLocal, directionLocal, tri.points[0],
+                        tri.points[1], tri.points[2], baryCoords, hitDist);
+
+                    if (!hit) {
+                        // Try reversed winding to hit back faces.
+                        glm::vec2 baryRev;
+                        hit = glm::intersectRayTriangle(
+                            originLocal, directionLocal, tri.points[0],
+                            tri.points[2], tri.points[1], baryRev, hitDist);
+                        if (hit) {
+                            baryCoords = glm::vec2(baryRev.y, baryRev.x);
+                        }
+                    }
+
+                    if (!hit || hitDist >= t) {
+                        continue;
+                    }
+
+                    t = hitDist;
+                    hitAnything = true;
+
+                    const float u = baryCoords.x;
+                    const float v = baryCoords.y;
+                    const float w = 1.0f - u - v;
+
+                    glm::vec3 intersectionPointLocal = w * tri.points[0] +
+                                                       u * tri.points[1] +
+                                                       v * tri.points[2];
+                    finalIntersectionPoint =
+                        multiplyMV(mesh.transform.transform,
+                                   glm::vec4(intersectionPointLocal, 1.0f));
+
+                    glm::vec3 normalLocal =
+                        glm::normalize(w * tri.normals[0] + u * tri.normals[1] +
+                                       v * tri.normals[2]);
+                    finalNormal = glm::normalize(
+                        multiplyMV(mesh.transform.invTranspose,
+                                   glm::vec4(normalLocal, 0.0f)));
+
+                    // Tangents transform with the model matrix (like
+                    // positions), not the inverse-transpose used for normals.
+                    glm::vec3 tangentLocal = computeTriangleTangent(tri);
+                    finalTangent = multiplyMV(mesh.transform.transform,
+                                              glm::vec4(tangentLocal, 0.0f));
+
+                    finalUV = w * tri.uvs[0] + u * tri.uvs[1] + v * tri.uvs[2];
+                    finalOutside = glm::dot(finalNormal, r.direction) < 0;
+                }
+
+                if (toVisitOffset == 0) {
+                    break;
+                }
+                currentNodeIndex = nodesToVisit[--toVisitOffset];
+            } else {
+                // Interior node: visit the near child first, stack the far one.
+                if (dirIsNeg[node->axis]) {
+                    nodesToVisit[toVisitOffset++] = currentNodeIndex + 1;
+                    currentNodeIndex = node->secondChildOffset;
+                } else {
+                    nodesToVisit[toVisitOffset++] = node->secondChildOffset;
+                    currentNodeIndex = currentNodeIndex + 1;
+                }
+            }
+        } else {
+            if (toVisitOffset == 0) {
+                break;
+            }
+            currentNodeIndex = nodesToVisit[--toVisitOffset];
+        }
+    }
+
+    if (!hitAnything) {
+        return -1;
+    }
+
+    intersectionPoint = finalIntersectionPoint;
+    normal = finalNormal;
+    tangent = finalTangent;
+    uv = glm::clamp(finalUV, 0.0f, 1.0f);
+    outside = finalOutside;
+
+    return glm::distance(r.origin, finalIntersectionPoint);
+}
 
 __host__ __device__ float
 meshIntersectionTestNaive(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
-                          glm::vec3 &normal, glm::vec2 &uv, bool &outside) {
+                          glm::vec3 &normal, glm::vec3 &tangent, glm::vec2 &uv,
+                          bool &outside) {
 
     float t = INFINITY;
     glm::vec3 finalIntersectionPoint;
     glm::vec3 finalNormal;
+    glm::vec3 finalTangent(0.0f);
     glm::vec2 finalUV; // Store the final UV coordinates
     bool finalOutside;
 
@@ -169,6 +342,11 @@ meshIntersectionTestNaive(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
         finalNormal = glm::normalize(multiplyMV(mesh.transform.invTranspose,
                                                 glm::vec4(normalLocal, 0.0f)));
 
+        // Tangents transform with the model matrix (like positions).
+        glm::vec3 tangentLocal = computeTriangleTangent(tri);
+        finalTangent =
+            multiplyMV(mesh.transform.transform, glm::vec4(tangentLocal, 0.0f));
+
         glm::vec2 uvLocal = w * tri.uvs[0] + u * tri.uvs[1] + v * tri.uvs[2];
 
         finalUV = uvLocal;
@@ -186,6 +364,7 @@ meshIntersectionTestNaive(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
     // Pass back intersection results
     intersectionPoint = finalIntersectionPoint;
     normal = finalNormal;
+    tangent = finalTangent;
     uv = glm::clamp(finalUV, 0.0f, 1.0f);
     outside = finalOutside;
 

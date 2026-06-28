@@ -34,6 +34,29 @@ BVH::BVH(vector<Triangle> &tris, int _maxPrimsInNode)
 
 BVH::~BVH() { freeLinearBVHTree(); }
 
+BVH::BVH(BVH &&other) noexcept
+    : maxPrimsInNode(other.maxPrimsInNode),
+      triangles(std::move(other.triangles)), nodes(other.nodes),
+      numNodes(other.numNodes) {
+    other.nodes = nullptr;
+    other.numNodes = 0;
+}
+
+BVH &BVH::operator=(BVH &&other) noexcept {
+    if (this != &other) {
+        // Release whatever we currently own before taking ownership.
+        delete[] nodes;
+
+        maxPrimsInNode = other.maxPrimsInNode;
+        triangles = std::move(other.triangles);
+        nodes = other.nodes;
+        numNodes = other.numNodes;
+        other.nodes = nullptr;
+        other.numNodes = 0;
+    }
+    return *this;
+}
+
 void BVH::initialize(vector<Triangle> &tris) {
     vector<BVHTriangle> bvhTriangles(tris.size());
     for (int i = 0; i < tris.size(); ++i) {
@@ -49,6 +72,7 @@ void BVH::initialize(vector<Triangle> &tris) {
 
     bvhTriangles.resize(0);
     bvhTriangles.shrink_to_fit();
+    numNodes = totalNodes;
     nodes = new LinearBVHNode[totalNodes];
     int offset = 0;
     flattenBVH(root, &offset);

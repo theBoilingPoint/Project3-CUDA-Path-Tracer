@@ -114,6 +114,10 @@ struct Geom {
             int numTriangles;
             Triangle *triangles;    // Host-side pointer
             Triangle *devTriangles; // Device-side pointer
+
+            int numNodes;
+            LinearBVHNode *nodes;    // Host-side flattened BVH
+            LinearBVHNode *devNodes; // Device-side flattened BVH
         } geometry;
     };
 
@@ -193,6 +197,7 @@ struct PathSegment {
 struct ShadeableIntersection {
     float t;
     glm::vec3 surfaceNormal;
+    glm::vec3 surfaceTangent; // World-space UV tangent (zero if unavailable)
     glm::vec2 uv;
     struct {
         int materialId;

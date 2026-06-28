@@ -44,6 +44,7 @@ __host__ __device__ void scatterRay(
     PathSegment& pathSegment,
     glm::vec3 woW,
     glm::vec3 normal,
+    glm::vec3 tangent,
     glm::vec3 &wiW,
     float &pdf,
     glm::vec3 &c,
