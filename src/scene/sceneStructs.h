@@ -172,6 +172,17 @@ struct TextureValues {
     glm::vec4 normal;
     glm::vec4 bump;
 };
+
+// Equirectangular (lat-long) HDR environment map. Sampled when a ray escapes
+// the scene, providing both the visible background for primary rays and
+// image-based lighting for bounced rays. `valid` is 0 when no map is
+// configured, in which case escaped rays see a black background.
+struct EnvironmentMap {
+    cudaTextureObject_t texObj;
+    int valid;
+    float intensity;
+    float rotation; // Yaw around the +Y axis, in radians (rotates the map)
+};
 /*****************************************************************************************************************************/
 
 struct Camera {

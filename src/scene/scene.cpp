@@ -65,6 +65,11 @@ Scene::~Scene() {
         delete[] md.nodes;
         md.nodes = nullptr;
     }
+
+    // Free the host-side environment map pixels (uploaded to a CUDA texture
+    // during deviceSceneInit; delete[] on nullptr is a no-op).
+    delete[] envMap;
+    envMap = nullptr;
 }
 
 void Scene::loadMesh(const std::string &filepath, Mesh &mesh) {
@@ -245,6 +250,35 @@ void Scene::loadFromJSON(const std::string &jsonName) {
                 "Bump texture added with ID: %d in the bump texture array. \n",
                 BumpTexToID[name]);
         }
+    }
+
+    // Reading the optional environment map (equirectangular HDR). Escaped rays
+    // sample this for both the background and image-based lighting.
+    if (data.contains("Environment")) {
+        const auto &env = data["Environment"];
+        if (!env.contains("TEXTURE_PATH")) {
+            std::cerr << "Environment block has no TEXTURE_PATH. Cannot load."
+                      << std::endl;
+            exit(-1);
+        }
+
+        // Resolve the path relative to the scene JSON file, like other textures.
+        std::filesystem::path envPath(env["TEXTURE_PATH"].get<std::string>());
+        if (envPath.is_relative()) {
+            envPath = std::filesystem::path(jsonName).parent_path() / envPath;
+        }
+        loadHDRTexture(envPath.string(), envMap, envMapSize);
+        envMapIntensity = env.contains("INTENSITY")
+                              ? env["INTENSITY"].get<float>()
+                              : 1.0f;
+        // ROTATION is authored in degrees (yaw around +Y); store radians.
+        envMapRotation = env.contains("ROTATION")
+                             ? env["ROTATION"].get<float>() * (PI / 180.0f)
+                             : 0.0f;
+        hasEnvMap = true;
+        printf("Environment map loaded (%dx%d, intensity %f, rotation %f deg)\n",
+               envMapSize.x, envMapSize.y, envMapIntensity,
+               envMapRotation * (180.0f / PI));
     }
 
     // Reading objects
@@ -430,10 +464,10 @@ void Scene::loadFromJSON(const std::string &jsonName) {
         }
     }
 
-    if (lights.size() == 0) {
-        std::cerr
-            << "No lights found in the scene, your render will be pitch black!"
-            << std::endl;
+    if (lights.size() == 0 && !hasEnvMap) {
+        std::cerr << "No lights and no environment map found in the scene, your "
+                     "render will be pitch black!"
+                  << std::endl;
         exit(-1);
     }
 

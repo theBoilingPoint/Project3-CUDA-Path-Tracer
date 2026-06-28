@@ -307,6 +307,28 @@ __device__ glm::vec4 sampleBump(Texture texture, glm::vec2 uv) {
     return glm::vec4(du, dv, 0.0f, 0.0f);
 }
 
+// Sample the equirectangular (lat-long) HDR environment map in world direction
+// `dir`. Azimuth maps to U in [0, 1], elevation to V (V = 0 at the +Y pole, V =
+// 1 at the -Y pole). Returns the radiance scaled by the configured intensity.
+__device__ glm::vec3 sampleEnvironment(const EnvironmentMap &env,
+                                       glm::vec3 dir) {
+    dir = glm::normalize(dir);
+
+    // Yaw the lookup direction around +Y by the configured rotation, which
+    // spins the map horizontally about the scene.
+    if (env.rotation != 0.0f) {
+        float s, c;
+        sincosf(env.rotation, &s, &c);
+        dir = glm::vec3(c * dir.x + s * dir.z, dir.y,
+                        -s * dir.x + c * dir.z);
+    }
+
+    float u = 0.5f + atan2f(dir.z, dir.x) * (0.5f * M_1_PIf);
+    float v = 0.5f - asinf(glm::clamp(dir.y, -1.0f, 1.0f)) * M_1_PIf;
+    float4 t = tex2D<float4>(env.texObj, u, v);
+    return glm::vec3(t.x, t.y, t.z) * env.intensity;
+}
+
 __device__ glm::vec3 checkerboard(float u, float v, int checkerSize) {
     int u_check = static_cast<int>(floor(u * checkerSize)) % 2;
     int v_check = static_cast<int>(floor(v * checkerSize)) % 2;
@@ -322,7 +344,7 @@ __global__ void shade(int iter, int depth, int num_paths,
                       ShadeableIntersection *shadeableIntersections,
                       PathSegment *pathSegments, Material *materials,
                       Texture *albedoTextures, Texture *normalTextures,
-                      Texture *bumpTextures) {
+                      Texture *bumpTextures, EnvironmentMap envMap) {
     // As long as we enter here, it means the ray has remaining bounces > 0
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_paths) {
@@ -338,7 +360,17 @@ __global__ void shade(int iter, int depth, int num_paths,
     ShadeableIntersection intersection = shadeableIntersections[idx];
     PathSegment &pathSegment = pathSegments[idx];
     if (intersection.t <= 0.0f) {
-        pathSegment.color = glm::vec3(0.0f);
+        // Ray escaped the scene. Sample the environment map (if any) in the
+        // ray's direction and treat it as incoming radiance: pathSegment.color
+        // is the accumulated throughput, so this is the background for primary
+        // rays and image-based lighting for bounced rays.
+        if (envMap.valid) {
+            pathSegment.color *=
+                sampleEnvironment(envMap, pathSegment.ray.direction);
+            pathSegment.hasHitLight = true;
+        } else {
+            pathSegment.color = glm::vec3(0.0f);
+        }
         pathSegment.remainingBounces = 0;
         return;
     }
@@ -566,7 +598,8 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
 
         shade<<<numblocksPathSegmentTracing, blockSize1d>>>(
             iter, depth, num_paths, dev.intersections, dev.paths, dev.materials,
-            dev.albedoTextures, dev.normalTextures, dev.bumpTextures);
+            dev.albedoTextures, dev.normalTextures, dev.bumpTextures,
+            dev.envMap);
         cudaDeviceSynchronize();
 
 #if USE_STREAM_COMPACTION

@@ -35,6 +35,10 @@ struct DeviceScene {
     Texture *normalTextures = nullptr;
     Texture *bumpTextures = nullptr;
 
+    // Equirectangular HDR environment map (valid == 0 when none configured).
+    // Backed by a texture resource tracked in `textureResources` for teardown.
+    EnvironmentMap envMap = {};
+
     // Per-render buffers.
     glm::vec3 *image = nullptr;
     PathSegment *paths = nullptr;

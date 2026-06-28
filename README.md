@@ -386,10 +386,15 @@ It looks like the BVH is able to detect the boxes but there are no triangles wit
 Thank you very much!
 
 # Recources
-- [Meshes Used in the Cover Image](https://poly.pizza/bundle/Bubbly-Bathroom-Set-eSvpFVB4Ft)
+## Libraries
 - [TinyObjLoader](https://github.com/tinyobjloader/tinyobjloader)
 - [TinyGLTF](https://github.com/syoyo/tinygltf)
 - [PBRT](https://pbr-book.org/)
 
-
+## Art
+### Models
+- [Meshes Used in the Cover Image](https://poly.pizza/bundle/Bubbly-Bathroom-Set-eSvpFVB4Ft)
+- 
+### Environment Maps
+- [Christmas Photo Studio 01](https://polyhaven.com/a/christmas_photo_studio_01)
 

@@ -163,6 +163,28 @@ static void initialiseTextures(DeviceScene &ds, Scene *scene) {
     checkCUDAError("Texture Initialisation");
 }
 
+// Upload the equirectangular HDR environment map (if any) to a CUDA texture
+// object. Bilinear filtering smooths the lat-long lookup; wrap addressing is
+// correct for the azimuth (U) seam and harmless at the poles (V stays in
+// [0, 1]). The backing array/handle are tracked in ds.textureResources, so
+// teardown is handled by freeTextureResources.
+static void initialiseEnvironmentMap(DeviceScene &ds, Scene *scene) {
+    if (!scene->hasEnvMap || scene->envMap == nullptr) {
+        ds.envMap.valid = 0;
+        return;
+    }
+
+    Texture tex =
+        createTextureObject(ds, scene->envMap, scene->envMapSize,
+                            cudaFilterModeLinear, cudaAddressModeWrap);
+    ds.envMap.texObj = tex.texObj;
+    ds.envMap.intensity = scene->envMapIntensity;
+    ds.envMap.rotation = scene->envMapRotation;
+    ds.envMap.valid = 1;
+
+    checkCUDAError("Environment Map Initialisation");
+}
+
 void deviceSceneInit(DeviceScene &ds, Scene *scene) {
     const Camera &cam = scene->state.camera;
     const int pixelcount = cam.resolution.x * cam.resolution.y;
@@ -203,6 +225,7 @@ void deviceSceneInit(DeviceScene &ds, Scene *scene) {
     }
 
     initialiseTextures(ds, scene);
+    initialiseEnvironmentMap(ds, scene);
 
     cudaMalloc(&ds.materials, scene->materials.size() * sizeof(Material));
     cudaMemcpy(ds.materials, scene->materials.data(),

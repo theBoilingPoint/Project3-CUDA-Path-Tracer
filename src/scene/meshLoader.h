@@ -27,3 +27,9 @@ void loadGLTFOrGLB(const std::string &filepath, std::vector<Triangle> &faces,
 
 void loadTexture(const std::string &filepath, const std::string &textureType,
                  glm::vec4 *&texture, glm::ivec2 &textureSize);
+
+// Load an HDR (or LDR) image as floating-point RGBA, preserving values outside
+// [0, 1]. Used for equirectangular environment maps, where the full radiance
+// range matters for image-based lighting.
+void loadHDRTexture(const std::string &filepath, glm::vec4 *&texture,
+                    glm::ivec2 &textureSize);

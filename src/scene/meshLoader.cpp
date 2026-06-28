@@ -630,3 +630,32 @@ void loadTexture(const std::string &filepath, const std::string &textureType,
 
     stbi_image_free(imageData);
 }
+
+void loadHDRTexture(const std::string &filepath, glm::vec4 *&texture,
+                    glm::ivec2 &textureSize) {
+    int width, height, channels;
+    // stbi_loadf returns floats; for .hdr files these carry the full radiance
+    // range, for LDR files they are the [0, 1] normalised values. Force RGBA so
+    // the layout matches glm::vec4 / the cudaArray float4 channel format.
+    float *imageData = stbi_loadf(filepath.c_str(), &width, &height, &channels,
+                                  STBI_rgb_alpha);
+
+    if (!imageData) {
+        std::cerr << "Failed to load HDR environment map: " << filepath
+                  << ". Please check the file path and that the format is "
+                     "supported by stbi_loadf (.hdr, .png, .jpg, ...). \n"
+                  << std::endl;
+        exit(-1);
+    }
+
+    texture = new glm::vec4[width * height];
+    textureSize = glm::ivec2(width, height);
+
+    for (int i = 0; i < width * height; ++i) {
+        int p = i * 4; // RGBA, 4 floats per pixel
+        texture[i] = glm::vec4(imageData[p], imageData[p + 1], imageData[p + 2],
+                               imageData[p + 3]);
+    }
+
+    stbi_image_free(imageData);
+}

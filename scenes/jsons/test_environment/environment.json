@@ -1,0 +1,69 @@
+{
+  "Materials": {
+    "diffuse_white": {
+      "TYPE": "Diffuse",
+      "RGB": [0.75, 0.75, 0.75]
+    },
+    "mirror": {
+      "TYPE": "Mirror",
+      "SPEC_RGB": [1.0, 1.0, 1.0]
+    },
+    "dielectric_white": {
+      "TYPE": "Dielectric",
+      "SPEC_RGB": [1.0, 1.0, 1.0],
+      "IOR": 1.5
+    },
+    "microfacet_r0.3": {
+      "TYPE": "Microfacet",
+      "RGB": [0.5, 0.5, 0.5],
+      "SPEC_RGB": [1.0, 1.0, 1.0],
+      "ROUGHNESS": 0.3,
+      "IOR": 1.5
+    }
+  },
+  "Environment": {
+    "TEXTURE_PATH": "../../textures/env/christmas_photo_studio_01_2k.hdr",
+    "INTENSITY": 1.0,
+    "ROTATION": 120.0
+  },
+  "Camera": {
+    "RES": [1920, 1080],
+    "FOVY": 45.0,
+    "ITERATIONS": 5000,
+    "DEPTH": 8,
+    "FILE": "environment",
+    "EYE": [0.0, 3.0, 12.0],
+    "LOOKAT": [0.0, 2.0, 0.0],
+    "UP": [0.0, 1.0, 0.0]
+  },
+  "Objects": [
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "mirror",
+      "TRANS": [-4.5, 2.0, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [4.0, 4.0, 4.0]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "dielectric_white",
+      "TRANS": [0.0, 2.0, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [4.0, 4.0, 4.0]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "microfacet_r0.3",
+      "TRANS": [4.5, 2.0, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [4.0, 4.0, 4.0]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "diffuse_white",
+      "TRANS": [0.0, -0.1, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [40.0, 0.2, 40.0]
+    }
+  ]
+}

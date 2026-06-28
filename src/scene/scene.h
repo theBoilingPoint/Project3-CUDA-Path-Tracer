@@ -61,5 +61,15 @@ class Scene {
     vector<tuple<glm::vec4 *, glm::ivec2>> albedoTextures;
     vector<tuple<glm::vec4 *, glm::ivec2>> normalTextures;
     vector<tuple<glm::vec4 *, glm::ivec2>> bumpTextures;
+
+    // Optional equirectangular HDR environment map. `envMap` is owned host-side
+    // CPU pixel data (freed in the destructor); it is uploaded to a CUDA texture
+    // object during deviceSceneInit. `hasEnvMap` is false when none is set.
+    glm::vec4 *envMap = nullptr;
+    glm::ivec2 envMapSize = glm::ivec2(0);
+    float envMapIntensity = 1.0f;
+    float envMapRotation = 0.0f; // Yaw around +Y, in radians
+    bool hasEnvMap = false;
+
     RenderState state;
 };
