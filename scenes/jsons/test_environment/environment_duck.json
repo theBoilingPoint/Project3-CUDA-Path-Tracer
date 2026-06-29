@@ -12,7 +12,7 @@
     }
   },
   "Environment": {
-    "TEXTURE_PATH": "../../textures/env/christmas_photo_studio_01_2k.hdr",
+    "TEXTURE_PATH": "../../textures/env/grasslands_sunset_2k.hdr",
     "INTENSITY": 1.0,
     "ROTATION": 180.0
   },

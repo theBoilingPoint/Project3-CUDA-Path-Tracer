@@ -214,15 +214,14 @@ void deviceSceneInit(DeviceScene &ds, Scene *scene) {
     cudaMemcpy(ds.totalNumberOfLights, &totalNumberOfLights, sizeof(int),
                cudaMemcpyHostToDevice);
 
-    // The triangles and BVH nodes now live in device memory, so free the host
-    // copies. geomMeshData is the sole owner (lightMeshData holds non-owning
-    // copies), so we free only it. delete[] on nullptr is a no-op.
-    for (MeshData &md : scene->geomMeshData) {
-        delete[] md.triangles;
-        md.triangles = nullptr;
-        delete[] md.nodes;
-        md.nodes = nullptr;
-    }
+    // NOTE: the host-side triangle/BVH arrays in scene->geomMeshData are
+    // intentionally NOT freed here. deviceSceneInit re-runs on every camera
+    // change (runCuda -> pathtraceFree + pathtraceInit when iteration resets to
+    // 0), and that re-upload reads these same host arrays. Freeing them here
+    // left dangling/null pointers, so the next re-init issued a HostToDevice
+    // cudaMemcpy from null and failed with cudaErrorInvalidValue (surfaced
+    // stickily at a later checkCUDAError). Scene owns this memory and frees it
+    // once in ~Scene().
 
     initialiseTextures(ds, scene);
     initialiseEnvironmentMap(ds, scene);

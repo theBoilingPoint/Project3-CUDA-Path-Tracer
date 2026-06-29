@@ -319,8 +319,7 @@ __device__ glm::vec3 sampleEnvironment(const EnvironmentMap &env,
     if (env.rotation != 0.0f) {
         float s, c;
         sincosf(env.rotation, &s, &c);
-        dir = glm::vec3(c * dir.x + s * dir.z, dir.y,
-                        -s * dir.x + c * dir.z);
+        dir = glm::vec3(c * dir.x + s * dir.z, dir.y, -s * dir.x + c * dir.z);
     }
 
     float u = 0.5f + atan2f(dir.z, dir.x) * (0.5f * M_1_PIf);

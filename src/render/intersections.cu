@@ -208,7 +208,12 @@ meshIntersectionTestBVH(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
                         }
                     }
 
-                    if (!hit || hitDist >= t) {
+                    // Reject hits behind the origin: glm::intersectRayTriangle
+                    // returns true for negative distances (the triangle is on
+                    // the backward extension of the ray), which would otherwise
+                    // beat every real forward hit. The small epsilon also keeps
+                    // a bounce ray from re-hitting the surface it started on.
+                    if (!hit || hitDist <= 1e-4f || hitDist >= t) {
                         continue;
                     }
 
@@ -318,7 +323,12 @@ meshIntersectionTestNaive(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
             }
         }
 
-        if (!hit || hitDist >= t) {
+        // Reject hits behind the origin: glm::intersectRayTriangle returns true
+        // for negative distances (the triangle lies on the backward extension
+        // of the ray), which would otherwise beat every real forward hit. The
+        // small epsilon also keeps a bounce ray from re-hitting its own
+        // surface.
+        if (!hit || hitDist <= 1e-4f || hitDist >= t) {
             continue;
         }
 
@@ -368,7 +378,7 @@ meshIntersectionTestNaive(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
     uv = glm::clamp(finalUV, 0.0f, 1.0f);
     outside = finalOutside;
 
-    // r.direction should be normalised so we don't need to devided by the
+    // r.direction should be normalised so we don't need to divide by the
     // length of r.direction
     return glm::distance(r.origin, finalIntersectionPoint);
 }
