@@ -150,8 +150,8 @@ computeTriangleTangent(const Triangle &tri) {
 
 __host__ __device__ float
 meshIntersectionTestBVH(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
-                        glm::vec3 &normal, glm::vec3 &tangent, glm::vec2 &uv,
-                        bool &outside) {
+                        glm::vec3 &normal, glm::vec3 &geometricNormal,
+                        glm::vec3 &tangent, glm::vec2 &uv, bool &outside) {
     const LinearBVHNode *nodes = mesh.geometry.devNodes;
     const Triangle *tris = mesh.geometry.devTriangles;
     if (nodes == nullptr) {
@@ -174,6 +174,7 @@ meshIntersectionTestBVH(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
     float t = INFINITY;
     glm::vec3 finalIntersectionPoint;
     glm::vec3 finalNormal;
+    glm::vec3 finalGeometricNormal;
     glm::vec3 finalTangent(0.0f);
     glm::vec2 finalUV;
     bool finalOutside = false;
@@ -238,6 +239,12 @@ meshIntersectionTestBVH(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
                         multiplyMV(mesh.transform.invTranspose,
                                    glm::vec4(normalLocal, 0.0f)));
 
+                    // Geometric (face) normal: follows the flat facet rather
+                    // than the interpolated vertex normals.
+                    finalGeometricNormal = glm::normalize(
+                        multiplyMV(mesh.transform.invTranspose,
+                                   glm::vec4(tri.planeNormal, 0.0f)));
+
                     // Tangents transform with the model matrix (like
                     // positions), not the inverse-transpose used for normals.
                     glm::vec3 tangentLocal = computeTriangleTangent(tri);
@@ -276,6 +283,7 @@ meshIntersectionTestBVH(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
 
     intersectionPoint = finalIntersectionPoint;
     normal = finalNormal;
+    geometricNormal = finalGeometricNormal;
     tangent = finalTangent;
     uv = glm::clamp(finalUV, 0.0f, 1.0f);
     outside = finalOutside;
@@ -285,12 +293,13 @@ meshIntersectionTestBVH(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
 
 __host__ __device__ float
 meshIntersectionTestNaive(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
-                          glm::vec3 &normal, glm::vec3 &tangent, glm::vec2 &uv,
-                          bool &outside) {
+                          glm::vec3 &normal, glm::vec3 &geometricNormal,
+                          glm::vec3 &tangent, glm::vec2 &uv, bool &outside) {
 
     float t = INFINITY;
     glm::vec3 finalIntersectionPoint;
     glm::vec3 finalNormal;
+    glm::vec3 finalGeometricNormal;
     glm::vec3 finalTangent(0.0f);
     glm::vec2 finalUV; // Store the final UV coordinates
     bool finalOutside;
@@ -352,6 +361,11 @@ meshIntersectionTestNaive(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
         finalNormal = glm::normalize(multiplyMV(mesh.transform.invTranspose,
                                                 glm::vec4(normalLocal, 0.0f)));
 
+        // Geometric (face) normal: follows the flat facet rather than the
+        // interpolated vertex normals.
+        finalGeometricNormal = glm::normalize(multiplyMV(
+            mesh.transform.invTranspose, glm::vec4(tri.planeNormal, 0.0f)));
+
         // Tangents transform with the model matrix (like positions).
         glm::vec3 tangentLocal = computeTriangleTangent(tri);
         finalTangent =
@@ -374,6 +388,7 @@ meshIntersectionTestNaive(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
     // Pass back intersection results
     intersectionPoint = finalIntersectionPoint;
     normal = finalNormal;
+    geometricNormal = finalGeometricNormal;
     tangent = finalTangent;
     uv = glm::clamp(finalUV, 0.0f, 1.0f);
     outside = finalOutside;

@@ -77,8 +77,8 @@ __host__ __device__ float sphereIntersectionTest(Geom sphere, Ray r,
  */
 __host__ __device__ float
 meshIntersectionTestNaive(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
-                          glm::vec3 &normal, glm::vec3 &tangent, glm::vec2 &uv,
-                          bool &outside);
+                          glm::vec3 &normal, glm::vec3 &geometricNormal,
+                          glm::vec3 &tangent, glm::vec2 &uv, bool &outside);
 
 /**
  * @brief Test intersection between a ray and a mesh by traversing the mesh's
@@ -89,5 +89,6 @@ meshIntersectionTestNaive(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
 __host__ __device__ float meshIntersectionTestBVH(Geom mesh, Ray r,
                                                   glm::vec3 &intersectionPoint,
                                                   glm::vec3 &normal,
+                                                  glm::vec3 &geometricNormal,
                                                   glm::vec3 &tangent,
                                                   glm::vec2 &uv, bool &outside);

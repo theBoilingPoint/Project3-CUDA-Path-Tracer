@@ -222,6 +222,10 @@ struct PathSegment {
 struct ShadeableIntersection {
     float t;
     glm::vec3 surfaceNormal;
+    // World-space geometric (face) normal, used to keep secondary rays on the
+    // correct side of the actual facet at grazing/silhouette angles where the
+    // smooth shading normal diverges from it.
+    glm::vec3 surfaceGeometricNormal;
     glm::vec3 surfaceTangent; // World-space UV tangent (zero if unavailable)
     glm::vec2 uv;
     MaterialIDs materials;

@@ -204,6 +204,7 @@ __global__ void computeIntersections(int depth, int num_paths,
         float t;
         glm::vec3 intersect_point;
         glm::vec3 normal;
+        glm::vec3 geometricNormal;
         glm::vec3 tangent;
         glm::vec2 uv;
         float t_min = FLT_MAX;
@@ -212,6 +213,7 @@ __global__ void computeIntersections(int depth, int num_paths,
 
         glm::vec3 tmp_intersect;
         glm::vec3 tmp_normal;
+        glm::vec3 tmp_geoNormal;
         glm::vec3 tmp_tangent;
         glm::vec2 tmp_uv;
 
@@ -226,18 +228,21 @@ __global__ void computeIntersections(int depth, int num_paths,
             if (geom.type == CUBE) {
                 t = boxIntersectionTest(geom, pathSegment.ray, tmp_intersect,
                                         tmp_normal, outside);
+                // Analytic primitives: shading normal is the geometric normal.
+                tmp_geoNormal = tmp_normal;
             } else if (geom.type == SPHERE) {
                 t = sphereIntersectionTest(geom, pathSegment.ray, tmp_intersect,
                                            tmp_normal, outside);
+                tmp_geoNormal = tmp_normal;
             } else if (geom.type == MESH) {
 #if USE_BVH
-                t = meshIntersectionTestBVH(geom, pathSegment.ray,
-                                            tmp_intersect, tmp_normal,
-                                            tmp_tangent, tmp_uv, outside);
+                t = meshIntersectionTestBVH(
+                    geom, pathSegment.ray, tmp_intersect, tmp_normal,
+                    tmp_geoNormal, tmp_tangent, tmp_uv, outside);
 #else
-                t = meshIntersectionTestNaive(geom, pathSegment.ray,
-                                              tmp_intersect, tmp_normal,
-                                              tmp_tangent, tmp_uv, outside);
+                t = meshIntersectionTestNaive(
+                    geom, pathSegment.ray, tmp_intersect, tmp_normal,
+                    tmp_geoNormal, tmp_tangent, tmp_uv, outside);
 #endif
             }
 
@@ -248,6 +253,7 @@ __global__ void computeIntersections(int depth, int num_paths,
                 hit_geom_index = i;
                 intersect_point = tmp_intersect;
                 normal = tmp_normal;
+                geometricNormal = tmp_geoNormal;
                 tangent = tmp_tangent;
                 uv = tmp_uv;
             }
@@ -261,6 +267,7 @@ __global__ void computeIntersections(int depth, int num_paths,
             intersections[path_index].t = t_min;
             intersections[path_index].materials = hitGeom.material;
             intersections[path_index].surfaceNormal = normal;
+            intersections[path_index].surfaceGeometricNormal = geometricNormal;
             intersections[path_index].surfaceTangent = tangent;
             intersections[path_index].uv = uv;
         }
@@ -438,16 +445,31 @@ __global__ void shade(int iter, int depth, int num_paths,
         scatterRay(pathSegment, woW, surfaceNormal, surfaceTangent, wiW, pdf, c,
                    eta, material, texVals, rng);
 
+        // Geometric (face) normal, kept on the same side as the shading
+        // normal (guards against inconsistent triangle winding).
+        glm::vec3 Ng = glm::normalize(intersection.surfaceGeometricNormal);
+        if (glm::dot(Ng, surfaceNormal) < 0.0f) {
+            Ng = -Ng;
+        }
+
+        // Shadow-terminator fix. At grazing/silhouette angles the smooth
+        // shading normal tilts away from the real facet, so a cosine sample
+        // around it can point BELOW the geometric surface. Such a bounce ray
+        // immediately goes into the mesh and self-occludes, leaving a dark rim
+        // along silhouettes (e.g. the duck's head edge). For reflective lobes,
+        // fold any below-horizon direction back above the geometric tangent
+        // plane. Transmission legitimately goes below, so leave dielectric be.
+        if (material.type != MatType::DIELECTRIC && glm::dot(wiW, Ng) < 0.0f) {
+            wiW = glm::normalize(wiW - 2.0f * glm::dot(wiW, Ng) * Ng);
+        }
+
         pathSegment.ray.direction = wiW; // wiW should already be normalized
-        // Without the offset, when the ray immediately intersects the surface
-        // it originated from, the refraction calculations may fail or yield
-        // invalid results, such as: Total Internal Reflection: The refracted
-        // ray might get treated as a reflective ray due to intersection
-        // problems, resulting in no transmitted light. Black Pixels: The lack
-        // of refraction or valid light contribution can result in areas
-        // appearing black.
-        pathSegment.ray.origin =
-            oldIntersect + pathSegment.ray.direction * 0.01f;
+        // Offset the new origin along the GEOMETRIC normal (it follows the real
+        // facet) on whichever side wiW leaves, so it reliably clears the
+        // surface even at grazing angles -- offsetting along the shading normal
+        // or along wiW does not, which is what produced the dark edge.
+        glm::vec3 offsetNormal = glm::dot(wiW, Ng) < 0.0f ? -Ng : Ng;
+        pathSegment.ray.origin = oldIntersect + offsetNormal * 1e-3f;
         pathSegment.color *= c;
 
 // TODO: is it worth it?
