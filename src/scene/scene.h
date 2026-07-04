@@ -43,6 +43,8 @@ class Scene {
 
     void loadMesh(const string &filepath, Mesh &mesh);
     void loadFromJSON(const string &jsonName);
+    // Builds envConditionalCdf/envMarginalCdf from the loaded env map pixels.
+    void buildEnvDistribution();
     template <typename T>
     void getValueFromJson(const json &data, const string &key, T &value);
 
@@ -52,6 +54,8 @@ class Scene {
 
     vector<Geom> geoms;
     vector<Geom> lights;
+    // Delta (point/directional) lights, parsed from an optional "Lights" block.
+    vector<DeltaLight> deltaLights;
     // Host-side mesh arrays, parallel to `geoms`/`lights`. `geomMeshData` owns
     // the arrays; `lightMeshData` holds non-owning copies (lights are copies of
     // geoms), so only `geomMeshData` is freed.
@@ -63,13 +67,22 @@ class Scene {
     vector<tuple<glm::vec4 *, glm::ivec2>> bumpTextures;
 
     // Optional equirectangular HDR environment map. `envMap` is owned host-side
-    // CPU pixel data (freed in the destructor); it is uploaded to a CUDA texture
-    // object during deviceSceneInit. `hasEnvMap` is false when none is set.
+    // CPU pixel data (freed in the destructor); it is uploaded to a CUDA
+    // texture object during deviceSceneInit. `hasEnvMap` is false when none is
+    // set.
     glm::vec4 *envMap = nullptr;
     glm::ivec2 envMapSize = glm::ivec2(0);
     float envMapIntensity = 1.0f;
     float envMapRotation = 0.0f; // Yaw around +Y, in radians
     bool hasEnvMap = false;
+
+    // Importance-sampling distribution over the env map, for NEE + MIS. A
+    // PBRT-style piecewise-constant 2D distribution built from pixel luminance
+    // weighted by sin(theta) (the lat-long solid-angle Jacobian). Both CDFs are
+    // normalized to [0, 1]. Empty when there is no env map. Uploaded to the
+    // device in deviceSceneInit.
+    std::vector<float> envConditionalCdf; // per row: h * (w + 1) entries
+    std::vector<float> envMarginalCdf;    // over rows: (h + 1) entries
 
     RenderState state;
 };

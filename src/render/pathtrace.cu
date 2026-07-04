@@ -30,6 +30,24 @@
 #define USE_ANTIALIASING 1
 #define USE_CHECKERBOARD_TEXTURE 0 // This is the basic procedural texture
 
+// Next-event estimation + multiple importance sampling. When 1, each surface
+// hit also samples the lights directly (environment, area, and point/
+// directional) via shadow rays, combined with BSDF sampling using the power
+// heuristic -- far less noise for small/bright lights. When 0, the tracer falls
+// back to pure BSDF path tracing: lights are only found by rays that happen to
+// hit them, env/emitter contributions are added at full weight, and no shadow
+// rays are cast. NOTE: point/directional (delta) lights can ONLY be sampled by
+// NEE, so they contribute nothing when this is 0.
+#define USE_MIS 1
+
+// Firefly suppression: cap each sample's contribution so a single bounce that
+// hits a tiny ultra-bright spot in the HDR (sun, softbox) or focuses a caustic
+// can't dump a huge finite value into a pixel. Biases highlights slightly
+// (energy loss in the brightest regions) in exchange for far less speckle.
+// Tune FIREFLY_CLAMP_MAX up if highlights look dim, down if speckle remains.
+#define USE_FIREFLY_CLAMP 0
+#define FIREFLY_CLAMP_MAX 8.0f
+
 static Scene *hst_scene = NULL;
 static GuiDataContainer *guiData = NULL;
 
@@ -182,10 +200,15 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth,
     // Assign values to the path segment
     segment.ray.origin = rayOrigin;
     segment.ray.direction = rayDirection;
-    segment.color = glm::vec3(1.0f);
+    segment.color = glm::vec3(1.0f);    // throughput
+    segment.radiance = glm::vec3(0.0f); // accumulated light
     segment.pixelIndex = index;
     segment.remainingBounces = traceDepth;
     segment.hasHitLight = false;
+    // The camera ray has no preceding bounce; flag it specular so directly
+    // viewed env/emitters are added at full weight (no MIS discount).
+    segment.bsdfPdf = 0.0f;
+    segment.specularBounce = true;
     segment.eta = 1.0f;
 }
 
@@ -261,6 +284,7 @@ __global__ void computeIntersections(int depth, int num_paths,
 
         if (hit_geom_index == -1) {
             intersections[path_index].t = -1.0f;
+            intersections[path_index].hitGeomIndex = -1;
         } else {
             Geom hitGeom = geoms[hit_geom_index];
             // The ray hits something
@@ -270,6 +294,7 @@ __global__ void computeIntersections(int depth, int num_paths,
             intersections[path_index].surfaceGeometricNormal = geometricNormal;
             intersections[path_index].surfaceTangent = tangent;
             intersections[path_index].uv = uv;
+            intersections[path_index].hitGeomIndex = hit_geom_index;
         }
     }
 }
@@ -335,6 +360,284 @@ __device__ glm::vec3 sampleEnvironment(const EnvironmentMap &env,
     return glm::vec3(t.x, t.y, t.z) * env.intensity;
 }
 
+// Binary search a normalized 1D CDF (n+1 entries, cdf[0]=0, cdf[n]=1). Returns
+// the bin index i in [0, n-1] with cdf[i] <= u < cdf[i+1], and the fractional
+// offset within that bin.
+__device__ int sampleCdf1D(const float *cdf, int n, float u, float &frac) {
+    int first = 0, len = n + 1;
+    while (len > 0) {
+        int half = len >> 1;
+        int mid = first + half;
+        if (cdf[mid] <= u) {
+            first = mid + 1;
+            len -= half + 1;
+        } else {
+            len = half;
+        }
+    }
+    int offset = glm::clamp(first - 1, 0, n - 1);
+    float lo = cdf[offset], hi = cdf[offset + 1];
+    float span = hi - lo;
+    frac = span > 0.0f ? (u - lo) / span : 0.5f;
+    return offset;
+}
+
+// Solid-angle pdf of the env importance distribution for a world direction
+// `dir`. Mirrors sampleEnvironment's lat-long mapping (including the yaw) to
+// find the (u, v) cell, reads the pdf in [0,1]^2 from the CDF differences, then
+// converts to solid angle by dividing out the 2*pi^2*sin(theta) Jacobian.
+__device__ float envPdf(const EnvironmentMap &env, glm::vec3 dir) {
+    if (!env.distValid) {
+        return 0.0f;
+    }
+    dir = glm::normalize(dir);
+    if (env.rotation != 0.0f) {
+        float s, c;
+        sincosf(env.rotation, &s, &c);
+        dir = glm::vec3(c * dir.x + s * dir.z, dir.y, -s * dir.x + c * dir.z);
+    }
+    float u = 0.5f + atan2f(dir.z, dir.x) * (0.5f * M_1_PIf);
+    float v = 0.5f - asinf(glm::clamp(dir.y, -1.0f, 1.0f)) * M_1_PIf;
+
+    const int w = env.width, h = env.height;
+    int iu = glm::clamp((int)(u * w), 0, w - 1);
+    int iv = glm::clamp((int)(v * h), 0, h - 1);
+    const float *row = env.conditionalCdf + (size_t)iv * (w + 1);
+    float pdfU = (float)w * (row[iu + 1] - row[iu]);
+    float pdfV = (float)h * (env.marginalCdf[iv + 1] - env.marginalCdf[iv]);
+
+    float sinTheta = sinf(M_PIf * v);
+    if (sinTheta <= 0.0f) {
+        return 0.0f;
+    }
+    return (pdfU * pdfV) / (2.0f * M_PIf * M_PIf * sinTheta);
+}
+
+// Importance-sample a world direction toward the environment. Returns the env
+// radiance in that direction; outputs the direction and its solid-angle pdf.
+__device__ glm::vec3 sampleEnvDirection(const EnvironmentMap &env, float xi1,
+                                        float xi2, glm::vec3 &dir,
+                                        float &pdfSA) {
+    const int w = env.width, h = env.height;
+    float dv, du;
+    int iv = sampleCdf1D(env.marginalCdf, h, xi2, dv);
+    const float *row = env.conditionalCdf + (size_t)iv * (w + 1);
+    int iu = sampleCdf1D(row, w, xi1, du);
+
+    float u = ((float)iu + du) / (float)w;
+    float v = ((float)iv + dv) / (float)h;
+    float pdfU = (float)w * (row[iu + 1] - row[iu]);
+    float pdfV = (float)h * (env.marginalCdf[iv + 1] - env.marginalCdf[iv]);
+
+    float theta = M_PIf * v;
+    float sinTheta = sinf(theta);
+    if (sinTheta <= 0.0f) {
+        pdfSA = 0.0f;
+        dir = glm::vec3(0.0f, 1.0f, 0.0f);
+        return glm::vec3(0.0f);
+    }
+    pdfSA = (pdfU * pdfV) / (2.0f * M_PIf * M_PIf * sinTheta);
+
+    // (u, v) -> direction in the map frame, then un-rotate into world space
+    // (inverse of the yaw sampleEnvironment applies on lookup).
+    float phi = (u - 0.5f) * 2.0f * M_PIf;
+    float sinPhi, cosPhi;
+    sincosf(phi, &sinPhi, &cosPhi);
+    glm::vec3 dirMap(sinTheta * cosPhi, cosf(theta), sinTheta * sinPhi);
+    if (env.rotation != 0.0f) {
+        float s, c;
+        sincosf(env.rotation, &s, &c);
+        dir = glm::vec3(c * dirMap.x - s * dirMap.z, dirMap.y,
+                        s * dirMap.x + c * dirMap.z);
+    } else {
+        dir = dirMap;
+    }
+    return sampleEnvironment(env, dir);
+}
+
+// Power heuristic (beta = 2) MIS weight for a strategy with pdf `a` competing
+// against another strategy with pdf `b` (both for the same sampled direction).
+__device__ float powerHeuristic(float a, float b) {
+    float a2 = a * a;
+    float denom = a2 + b * b;
+    return denom > 0.0f ? a2 / denom : 0.0f;
+}
+
+// Occlusion test for a shadow ray. Returns true if any scene geometry is hit at
+// a distance in (epsilon, tMax). For the environment light (at infinity) tMax
+// is effectively unbounded, so any hit blocks it.
+__device__ bool anyHit(const Ray &ray, Geom *geoms, int geoms_size,
+                       float tMax) {
+    glm::vec3 tmpP, tmpN, tmpGN, tmpT;
+    glm::vec2 tmpUV;
+    bool outside;
+    for (int i = 0; i < geoms_size; ++i) {
+        Geom &geom = geoms[i];
+        float t = -1.0f;
+        if (geom.type == CUBE) {
+            t = boxIntersectionTest(geom, ray, tmpP, tmpN, outside);
+        } else if (geom.type == SPHERE) {
+            t = sphereIntersectionTest(geom, ray, tmpP, tmpN, outside);
+        } else if (geom.type == MESH) {
+#if USE_BVH
+            t = meshIntersectionTestBVH(geom, ray, tmpP, tmpN, tmpGN, tmpT,
+                                        tmpUV, outside);
+#else
+            t = meshIntersectionTestNaive(geom, ray, tmpP, tmpN, tmpGN, tmpT,
+                                          tmpUV, outside);
+#endif
+        }
+        if (t > 1e-3f && t < tMax) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// World-space surface area of an emitter geom, from the linear part of its
+// transform. Supports analytic cube and sphere emitters, and triangle meshes
+// (summed per-triangle world area). Returns 0 for anything else.
+//
+// NOTE: the mesh case is O(numTriangles) and is evaluated per light sample /
+// per emitter hit. That is fine for the low-poly emitters these scenes use; a
+// large mesh light would want a precomputed area (and triangle-area CDF)
+// uploaded once, like the environment distribution.
+__device__ float lightGeomArea(const Geom &g) {
+    glm::vec3 ex =
+        glm::vec3(g.transform.transform[0]); // local +X edge in world
+    glm::vec3 ey = glm::vec3(g.transform.transform[1]);
+    glm::vec3 ez = glm::vec3(g.transform.transform[2]);
+    if (g.type == CUBE) {
+        // Unit cube [-0.5,0.5]^3: full edge vectors are ex/ey/ez, so opposite
+        // face pairs give 2*(|ey x ez| + |ex x ez| + |ex x ey|).
+        return 2.0f * (glm::length(glm::cross(ey, ez)) +
+                       glm::length(glm::cross(ex, ez)) +
+                       glm::length(glm::cross(ex, ey)));
+    } else if (g.type == SPHERE) {
+        // Local radius 0.5; assumes ~uniform scale (world radius 0.5*|ex|).
+        float r = 0.5f * glm::length(ex);
+        return 4.0f * M_PIf * r * r;
+    } else if (g.type == MESH) {
+        const Triangle *tris = g.geometry.devTriangles;
+        int n = g.geometry.numTriangles;
+        float area = 0.0f;
+        for (int i = 0; i < n; ++i) {
+            glm::vec3 p0 = multiplyMV(g.transform.transform,
+                                      glm::vec4(tris[i].points[0], 1.0f));
+            glm::vec3 p1 = multiplyMV(g.transform.transform,
+                                      glm::vec4(tris[i].points[1], 1.0f));
+            glm::vec3 p2 = multiplyMV(g.transform.transform,
+                                      glm::vec4(tris[i].points[2], 1.0f));
+            area += 0.5f * glm::length(glm::cross(p1 - p0, p2 - p0));
+        }
+        return area;
+    }
+    return 0.0f;
+}
+
+// Sample a world-space point + outward world normal uniformly on an emitter's
+// surface. Outputs the area-measure pdf (1/area); 0 for unsupported geoms.
+__device__ void sampleLightGeom(const Geom &g, float u1, float u2, float u3,
+                                glm::vec3 &pWorld, glm::vec3 &nWorld,
+                                float &pdfArea) {
+    float area = lightGeomArea(g);
+    pdfArea = area > 0.0f ? 1.0f / area : 0.0f;
+    if (pdfArea == 0.0f) {
+        return;
+    }
+
+    // Mesh emitter: pick a triangle proportional to world area, then sample a
+    // uniform barycentric point on it. Area-weighted selection makes the pdf
+    // uniform over the surface (1/totalArea), matching lightGeomArea used by
+    // the reverse MIS weight. (Two O(numTriangles) passes -- see the note
+    // above.)
+    if (g.type == MESH) {
+        const Triangle *tris = g.geometry.devTriangles;
+        int n = g.geometry.numTriangles;
+        float target = u1 * area;
+        int chosen = n - 1;
+        float accum = 0.0f;
+        for (int i = 0; i < n; ++i) {
+            glm::vec3 p0 = multiplyMV(g.transform.transform,
+                                      glm::vec4(tris[i].points[0], 1.0f));
+            glm::vec3 p1 = multiplyMV(g.transform.transform,
+                                      glm::vec4(tris[i].points[1], 1.0f));
+            glm::vec3 p2 = multiplyMV(g.transform.transform,
+                                      glm::vec4(tris[i].points[2], 1.0f));
+            accum += 0.5f * glm::length(glm::cross(p1 - p0, p2 - p0));
+            if (accum >= target) {
+                chosen = i;
+                break;
+            }
+        }
+        const Triangle &tri = tris[chosen];
+        float su = u2, sv = u3;
+        if (su + sv > 1.0f) { // fold into the lower triangle
+            su = 1.0f - su;
+            sv = 1.0f - sv;
+        }
+        glm::vec3 lp = tri.points[0] + su * (tri.points[1] - tri.points[0]) +
+                       sv * (tri.points[2] - tri.points[0]);
+        pWorld = multiplyMV(g.transform.transform, glm::vec4(lp, 1.0f));
+        nWorld = glm::normalize(multiplyMV(g.transform.invTranspose,
+                                           glm::vec4(tri.planeNormal, 0.0f)));
+        return;
+    }
+
+    glm::vec3 pLocal, nLocal;
+    if (g.type == SPHERE) {
+        // Uniform point on the unit sphere (local radius 0.5).
+        float z = 1.0f - 2.0f * u1;
+        float r = sqrtf(fmaxf(0.0f, 1.0f - z * z));
+        float phi = 2.0f * M_PIf * u2;
+        nLocal = glm::vec3(r * cosf(phi), r * sinf(phi), z);
+        pLocal = 0.5f * nLocal;
+    } else { // CUBE
+        glm::vec3 ex = glm::vec3(g.transform.transform[0]);
+        glm::vec3 ey = glm::vec3(g.transform.transform[1]);
+        glm::vec3 ez = glm::vec3(g.transform.transform[2]);
+        float ax = glm::length(glm::cross(ey, ez)); // area of a +/-x face
+        float ay = glm::length(glm::cross(ex, ez));
+        float az = glm::length(glm::cross(ex, ey));
+        float total = ax + ay + az;
+        float pick = u1 * total;
+        float sign = (u2 < 0.5f) ? 0.5f : -0.5f;
+        float s = (u2 < 0.5f) ? (u2 * 2.0f) : ((u2 - 0.5f) * 2.0f); // in-face
+        float a = s - 0.5f, b = u3 - 0.5f; // in-face coords in [-0.5, 0.5]
+        if (pick < ax) {
+            pLocal = glm::vec3(sign, a, b);
+            nLocal = glm::vec3(sign > 0.0f ? 1.0f : -1.0f, 0.0f, 0.0f);
+        } else if (pick < ax + ay) {
+            pLocal = glm::vec3(a, sign, b);
+            nLocal = glm::vec3(0.0f, sign > 0.0f ? 1.0f : -1.0f, 0.0f);
+        } else {
+            pLocal = glm::vec3(a, b, sign);
+            nLocal = glm::vec3(0.0f, 0.0f, sign > 0.0f ? 1.0f : -1.0f);
+        }
+    }
+
+    pWorld = multiplyMV(g.transform.transform, glm::vec4(pLocal, 1.0f));
+    nWorld = glm::normalize(
+        multiplyMV(g.transform.invTranspose, glm::vec4(nLocal, 0.0f)));
+}
+
+// Convert an area-measure pdf at a light point (pL, normal nL) into the
+// solid-angle pdf as seen from shading point p. Emitters are treated as
+// two-sided (|cos| at the light). Returns 0 if degenerate.
+__device__ float lightPdfSolidAngle(float pdfArea, const glm::vec3 &p,
+                                    const glm::vec3 &pL, const glm::vec3 &nL) {
+    glm::vec3 d = pL - p;
+    float dist2 = glm::dot(d, d);
+    if (dist2 <= 0.0f) {
+        return 0.0f;
+    }
+    float cosL = fabsf(glm::dot(nL, d)) / sqrtf(dist2); // |cos| at the light
+    if (cosL <= 0.0f) {
+        return 0.0f;
+    }
+    return pdfArea * dist2 / cosL;
+}
+
 __device__ glm::vec3 checkerboard(float u, float v, int checkerSize) {
     int u_check = static_cast<int>(floor(u * checkerSize)) % 2;
     int v_check = static_cast<int>(floor(v * checkerSize)) % 2;
@@ -350,7 +653,9 @@ __global__ void shade(int iter, int depth, int num_paths,
                       ShadeableIntersection *shadeableIntersections,
                       PathSegment *pathSegments, Material *materials,
                       Texture *albedoTextures, Texture *normalTextures,
-                      Texture *bumpTextures, EnvironmentMap envMap) {
+                      Texture *bumpTextures, EnvironmentMap envMap, Geom *geoms,
+                      int geoms_size, Geom *lights, int numLights,
+                      DeltaLight *deltaLights, int numDeltaLights) {
     // As long as we enter here, it means the ray has remaining bounces > 0
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_paths) {
@@ -366,16 +671,25 @@ __global__ void shade(int iter, int depth, int num_paths,
     ShadeableIntersection intersection = shadeableIntersections[idx];
     PathSegment &pathSegment = pathSegments[idx];
     if (intersection.t <= 0.0f) {
-        // Ray escaped the scene. Sample the environment map (if any) in the
-        // ray's direction and treat it as incoming radiance: pathSegment.color
-        // is the accumulated throughput, so this is the background for primary
-        // rays and image-based lighting for bounced rays.
+        // Ray escaped the scene: add the environment radiance along it. This is
+        // both the visible background (primary rays) and image-based lighting
+        // (bounced rays). Because we ALSO sample the env directly via NEE at
+        // the previous surface, this BSDF-sampled contribution must be
+        // MIS-weighted to avoid double counting. Specular bounces and the
+        // primary ray (both flagged specularBounce) have no competing NEE, so
+        // they take full weight.
         if (envMap.valid) {
-            pathSegment.color *=
-                sampleEnvironment(envMap, pathSegment.ray.direction);
+            glm::vec3 dir = pathSegment.ray.direction;
+            glm::vec3 Le = sampleEnvironment(envMap, dir);
+            float weight = 1.0f;
+#if USE_MIS
+            if (!pathSegment.specularBounce && envMap.distValid) {
+                float lightPdf = envPdf(envMap, dir);
+                weight = powerHeuristic(pathSegment.bsdfPdf, lightPdf);
+            }
+#endif
+            pathSegment.radiance += pathSegment.color * Le * weight;
             pathSegment.hasHitLight = true;
-        } else {
-            pathSegment.color = glm::vec3(0.0f);
         }
         pathSegment.remainingBounces = 0;
         return;
@@ -425,7 +739,30 @@ __global__ void shade(int iter, int depth, int num_paths,
 
     // if we hit a light
     if (material.emittance > 0.0f) {
-        pathSegment.color *= materialColor * material.emittance;
+        // A BSDF-sampled ray landed on an emitter. This is one of the two MIS
+        // strategies for area lights (the other is area-light NEE below), so
+        // weight it against the pdf that NEE would have used to sample this
+        // same direction. Full weight when NEE couldn't have taken it: a
+        // specular/ primary ray, an unsupported (area == 0) emitter, or no
+        // lights.
+        glm::vec3 Le = materialColor * material.emittance;
+        float weight = 1.0f;
+#if USE_MIS
+        if (!pathSegment.specularBounce && numLights > 0 &&
+            intersection.hitGeomIndex >= 0) {
+            float area = lightGeomArea(geoms[intersection.hitGeomIndex]);
+            glm::vec3 nL = glm::normalize(intersection.surfaceGeometricNormal);
+            float cosL = fabsf(glm::dot(nL, pathSegment.ray.direction));
+            if (area > 0.0f && cosL > 0.0f) {
+                // Solid-angle light pdf for this hit, incl. 1/numLights uniform
+                // light selection -- matches the NEE sampler below.
+                float lightPdf = (intersection.t * intersection.t) /
+                                 (area * cosL * (float)numLights);
+                weight = powerHeuristic(pathSegment.bsdfPdf, lightPdf);
+            }
+        }
+#endif
+        pathSegment.radiance += pathSegment.color * Le * weight;
         pathSegment.remainingBounces = 0;
         pathSegment.hasHitLight = true;
     } else {
@@ -442,15 +779,143 @@ __global__ void shade(int iter, int depth, int num_paths,
         float pdf;
         float eta;
 
-        scatterRay(pathSegment, woW, surfaceNormal, surfaceTangent, wiW, pdf, c,
-                   eta, material, texVals, rng);
-
         // Geometric (face) normal, kept on the same side as the shading
         // normal (guards against inconsistent triangle winding).
         glm::vec3 Ng = glm::normalize(intersection.surfaceGeometricNormal);
         if (glm::dot(Ng, surfaceNormal) < 0.0f) {
             Ng = -Ng;
         }
+
+        bool isSpecular = (material.type == MatType::MIRROR ||
+                           material.type == MatType::DIELECTRIC);
+
+#if USE_MIS
+        // --- Next-event estimation toward the environment light (MIS) ---
+        // Sample a direction from the env's luminance distribution, evaluate
+        // the BSDF for it, and add its (visibility-tested) contribution
+        // weighted against BSDF sampling. Skipped for specular lobes (delta
+        // BSDF cannot be evaluated for an arbitrary direction; the BSDF-sampled
+        // escape already captures it at full weight).
+        if (envMap.valid && envMap.distValid && !isSpecular) {
+            glm::vec3 lightDir;
+            float lightPdf;
+            glm::vec3 Le = sampleEnvDirection(envMap, u01(rng), u01(rng),
+                                              lightDir, lightPdf);
+            if (lightPdf > 0.0f && glm::dot(lightDir, Ng) > 0.0f) {
+                glm::vec3 f;
+                float bsdfPdfL;
+                evalBSDF(woW, surfaceNormal, surfaceTangent, lightDir, material,
+                         texVals, f, bsdfPdfL);
+                float cosAtSurface = glm::dot(lightDir, surfaceNormal);
+                if (bsdfPdfL > 0.0f && cosAtSurface > 0.0f &&
+                    (f.x > 0.0f || f.y > 0.0f || f.z > 0.0f)) {
+                    Ray shadowRay;
+                    shadowRay.origin = oldIntersect + Ng * 1e-3f;
+                    shadowRay.direction = lightDir;
+                    if (!anyHit(shadowRay, geoms, geoms_size, FLT_MAX)) {
+                        float weight = powerHeuristic(lightPdf, bsdfPdfL);
+                        pathSegment.radiance += pathSegment.color * f *
+                                                cosAtSurface * Le * weight /
+                                                lightPdf;
+                    }
+                }
+            }
+        }
+
+        // --- Next-event estimation toward an area light (MIS) ---
+        // Pick one emitter uniformly, sample a point on it, and add its
+        // shadow-tested contribution weighted against BSDF sampling. Dividing
+        // by the 1/numLights selection probability makes this an unbiased
+        // estimate of all the area lights' direct contribution.
+        if (numLights > 0 && !isSpecular) {
+            int li = min((int)(u01(rng) * numLights), numLights - 1);
+            Geom L = lights[li];
+            glm::vec3 pL, nL;
+            float pdfArea;
+            sampleLightGeom(L, u01(rng), u01(rng), u01(rng), pL, nL, pdfArea);
+            if (pdfArea > 0.0f) {
+                glm::vec3 d = pL - oldIntersect;
+                float dist = sqrtf(glm::dot(d, d));
+                glm::vec3 lightDir = d / dist;
+                float pdfSA =
+                    lightPdfSolidAngle(pdfArea, oldIntersect, pL, nL) /
+                    (float)numLights;
+                float cosAtSurface = glm::dot(lightDir, surfaceNormal);
+                if (pdfSA > 0.0f && cosAtSurface > 0.0f &&
+                    glm::dot(lightDir, Ng) > 0.0f) {
+                    glm::vec3 f;
+                    float bsdfPdfL;
+                    evalBSDF(woW, surfaceNormal, surfaceTangent, lightDir,
+                             material, texVals, f, bsdfPdfL);
+                    if (f.x > 0.0f || f.y > 0.0f || f.z > 0.0f) {
+                        Ray shadowRay;
+                        shadowRay.origin = oldIntersect + Ng * 1e-3f;
+                        shadowRay.direction = lightDir;
+                        // Stop just short of the light so its own surface does
+                        // not count as an occluder.
+                        if (!anyHit(shadowRay, geoms, geoms_size,
+                                    dist - 1e-3f)) {
+                            Material lMat = materials[L.material.materialId];
+                            glm::vec3 Le = lMat.color * lMat.emittance;
+                            float weight = powerHeuristic(pdfSA, bsdfPdfL);
+                            pathSegment.radiance += pathSegment.color * f *
+                                                    cosAtSurface * Le * weight /
+                                                    pdfSA;
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Next-event estimation toward delta (point/directional) lights ---
+        // Delta lights can't be hit by BSDF sampling, so each is a single
+        // shadow-ray sample with no MIS weight (weight = 1).
+        for (int li = 0; li < numDeltaLights && !isSpecular; ++li) {
+            DeltaLight dl = deltaLights[li];
+            glm::vec3 lightDir;
+            float dist;
+            glm::vec3 Li;
+            if (dl.type == POINT_LIGHT) {
+                glm::vec3 d = dl.position - oldIntersect;
+                float dist2 = glm::dot(d, d);
+                dist = sqrtf(dist2);
+                lightDir = d / dist;
+                Li = dl.radiance / dist2; // inverse-square falloff
+            } else {                      // DIRECTIONAL_LIGHT
+                lightDir = -glm::normalize(dl.direction);
+                dist = FLT_MAX;
+                Li = dl.radiance;
+            }
+            float cosAtSurface = glm::dot(lightDir, surfaceNormal);
+            if (cosAtSurface <= 0.0f || glm::dot(lightDir, Ng) <= 0.0f) {
+                continue;
+            }
+            glm::vec3 f;
+            float bsdfPdfL;
+            evalBSDF(woW, surfaceNormal, surfaceTangent, lightDir, material,
+                     texVals, f, bsdfPdfL);
+            if (f.x <= 0.0f && f.y <= 0.0f && f.z <= 0.0f) {
+                continue;
+            }
+            Ray shadowRay;
+            shadowRay.origin = oldIntersect + Ng * 1e-3f;
+            shadowRay.direction = lightDir;
+            float tMax = (dl.type == POINT_LIGHT) ? dist - 1e-3f : FLT_MAX;
+            if (!anyHit(shadowRay, geoms, geoms_size, tMax)) {
+                pathSegment.radiance +=
+                    pathSegment.color * f * cosAtSurface * Li;
+            }
+        }
+#endif // USE_MIS
+
+        scatterRay(pathSegment, woW, surfaceNormal, surfaceTangent, wiW, pdf, c,
+                   eta, material, texVals, rng);
+
+        // Record MIS state for the ray we're about to spawn: the env seen
+        // through it (on escape) will be weighted against this pdf, unless the
+        // bounce was specular (then it takes full weight).
+        pathSegment.bsdfPdf = pdf;
+        pathSegment.specularBounce = isSpecular;
 
         // Shadow-terminator fix. At grazing/silhouette angles the smooth
         // shading normal tilts away from the real facet, so a cosine sample
@@ -502,8 +967,23 @@ __global__ void finalGather(int nPaths, glm::vec3 *image,
 
     if (index < nPaths) {
         PathSegment iterationPath = iterationPaths[index];
-        if (iterationPath.hasHitLight) {
-            image[iterationPath.pixelIndex] += iterationPath.color;
+        // `radiance` is the path's accumulated light (emitter/env hits + NEE).
+        // Add it unconditionally: with next-event estimation a path can carry
+        // radiance even if it never terminated on a light itself.
+        glm::vec3 c = iterationPath.radiance;
+        // Drop non-finite samples. A NaN/Inf from a degenerate BSDF or
+        // frame (e.g. a divide-by-zero in a near-mirror microfacet lobe, or
+        // normalize() of a zero half-vector) would otherwise be added once
+        // and poison the pixel for the whole render -> a permanent speckle.
+        if (isfinite(c.x) && isfinite(c.y) && isfinite(c.z)) {
+#if USE_FIREFLY_CLAMP
+            // Scale down (preserving hue) any sample brighter than the cap.
+            float m = fmaxf(c.x, fmaxf(c.y, c.z));
+            if (m > FIREFLY_CLAMP_MAX) {
+                c *= FIREFLY_CLAMP_MAX / m;
+            }
+#endif
+            image[iterationPath.pixelIndex] += c;
         }
     }
 }
@@ -620,7 +1100,9 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
         shade<<<numblocksPathSegmentTracing, blockSize1d>>>(
             iter, depth, num_paths, dev.intersections, dev.paths, dev.materials,
             dev.albedoTextures, dev.normalTextures, dev.bumpTextures,
-            dev.envMap);
+            dev.envMap, dev.geoms, hst_scene->geoms.size(), dev.lights,
+            (int)hst_scene->lights.size(), dev.deltaLights,
+            (int)hst_scene->deltaLights.size());
         cudaDeviceSynchronize();
 
 #if USE_STREAM_COMPACTION

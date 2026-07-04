@@ -181,6 +181,29 @@ static void initialiseEnvironmentMap(DeviceScene &ds, Scene *scene) {
     ds.envMap.intensity = scene->envMapIntensity;
     ds.envMap.rotation = scene->envMapRotation;
     ds.envMap.valid = 1;
+    ds.envMap.width = scene->envMapSize.x;
+    ds.envMap.height = scene->envMapSize.y;
+    ds.envMap.conditionalCdf = nullptr;
+    ds.envMap.marginalCdf = nullptr;
+    ds.envMap.distValid = 0;
+
+    // Upload the importance-sampling CDFs (for NEE + MIS), if they were built.
+    if (!scene->envConditionalCdf.empty() && !scene->envMarginalCdf.empty()) {
+        float *devConditional = nullptr;
+        float *devMarginal = nullptr;
+        const size_t condBytes =
+            scene->envConditionalCdf.size() * sizeof(float);
+        const size_t margBytes = scene->envMarginalCdf.size() * sizeof(float);
+        cudaMalloc(&devConditional, condBytes);
+        cudaMalloc(&devMarginal, margBytes);
+        cudaMemcpy(devConditional, scene->envConditionalCdf.data(), condBytes,
+                   cudaMemcpyHostToDevice);
+        cudaMemcpy(devMarginal, scene->envMarginalCdf.data(), margBytes,
+                   cudaMemcpyHostToDevice);
+        ds.envMap.conditionalCdf = devConditional;
+        ds.envMap.marginalCdf = devMarginal;
+        ds.envMap.distValid = 1;
+    }
 
     checkCUDAError("Environment Map Initialisation");
 }
@@ -213,6 +236,16 @@ void deviceSceneInit(DeviceScene &ds, Scene *scene) {
     cudaMalloc(&ds.totalNumberOfLights, sizeof(int));
     cudaMemcpy(ds.totalNumberOfLights, &totalNumberOfLights, sizeof(int),
                cudaMemcpyHostToDevice);
+
+    // Delta (point/directional) lights.
+    ds.deltaLights = nullptr;
+    if (!scene->deltaLights.empty()) {
+        cudaMalloc(&ds.deltaLights,
+                   scene->deltaLights.size() * sizeof(DeltaLight));
+        cudaMemcpy(ds.deltaLights, scene->deltaLights.data(),
+                   scene->deltaLights.size() * sizeof(DeltaLight),
+                   cudaMemcpyHostToDevice);
+    }
 
     // NOTE: the host-side triangle/BVH arrays in scene->geomMeshData are
     // intentionally NOT freed here. deviceSceneInit re-runs on every camera
@@ -261,6 +294,7 @@ void deviceSceneFree(DeviceScene &ds) {
     cudaFree(ds.geomBVHNodes);
     cudaFree(ds.lightBVHNodes);
     cudaFree(ds.totalNumberOfLights);
+    cudaFree(ds.deltaLights); // no-op if null
     cudaFree(ds.materials);
     cudaFree(ds.intersections);
 
@@ -270,6 +304,12 @@ void deviceSceneFree(DeviceScene &ds) {
     cudaFree(ds.albedoTextures); // no-op if null
     cudaFree(ds.normalTextures);
     cudaFree(ds.bumpTextures);
+
+    // Env importance-sampling CDFs (const pointers; cast away for cudaFree).
+    cudaFree((void *)ds.envMap.conditionalCdf);
+    cudaFree((void *)ds.envMap.marginalCdf);
+    ds.envMap.conditionalCdf = nullptr;
+    ds.envMap.marginalCdf = nullptr;
 
     checkCUDAError("deviceSceneFree");
 }

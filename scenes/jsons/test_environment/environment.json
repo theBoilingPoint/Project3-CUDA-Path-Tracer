@@ -15,8 +15,8 @@
     },
     "microfacet_r0.3": {
       "TYPE": "Microfacet",
-      "RGB": [0.0, 1.0, 0.0],
-      "SPEC_RGB": [0.5, 0.5, 0.5],
+      "RGB": [0.0, 0.0, 0.0],
+      "SPEC_RGB": [1.0, 0.0, 0.0],
       "ROUGHNESS": 0.01,
       "IOR": 1.5
     }

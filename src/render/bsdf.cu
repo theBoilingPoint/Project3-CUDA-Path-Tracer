@@ -138,10 +138,10 @@ __host__ __device__ glm::vec3 evalDielectric() {
     return glm::vec3(0.0f);
 }
 
-__host__ __device__ glm::vec3 evalMicrofacet(const glm::vec3 &woL, const glm::vec3 &wiL, const glm::vec3 &whL, const float roughness, const float m_extIOR, const float m_intIOR, const glm::vec3 &m_kd, const float m_ks) {
+__host__ __device__ glm::vec3 evalMicrofacet(const glm::vec3 &woL, const glm::vec3 &wiL, const glm::vec3 &whL, const float roughness, const float m_extIOR, const float m_intIOR, const glm::vec3 &m_kd, const float m_ks, const glm::vec3 &specColour) {
     float cosThetaWiL = cosTheta(wiL);
     float cosThetaWoL = cosTheta(woL);
-    
+
     if (cosThetaWoL <= 0 || cosThetaWiL <= 0) {
         return glm::vec3(0.0f);
     }
@@ -152,7 +152,13 @@ __host__ __device__ glm::vec3 evalMicrofacet(const glm::vec3 &woL, const glm::ve
     float F = fresnel(wh_dot_woL, m_extIOR, m_intIOR);
     float G = computeG(woL, whL, roughness) * computeG(wiL, whL, roughness);
 
-    return m_kd / M_PIf + m_ks * D * F * G / (4 * cosThetaWoL * cosThetaWiL * cosTheta(whL));
+    // specColour tints the glossy lobe (SPEC_RGB). The scalar m_ks is still the
+    // lobe's energy weight and the sampling probability, so the pdf is
+    // unaffected and MIS stays consistent; specColour only recolours the
+    // reflected specular energy (identity when SPEC_RGB = [1,1,1]).
+    glm::vec3 specular = specColour * (m_ks * D * F * G /
+                         (4 * cosThetaWoL * cosThetaWiL * cosTheta(whL)));
+    return m_kd / M_PIf + specular;
 }
 
 /** Bounce Directions and Return Colours */
@@ -164,11 +170,8 @@ __host__ __device__ glm::vec3 sampleDiffuse(const glm::vec3 &albedo, const glm::
 }
 
 __host__ __device__ glm::vec3 sampleMirror(const glm::vec3 &normal, const glm::mat3 &worldToLocal, const glm::vec3 &woW, glm::vec3 &wiW, const glm::vec3 &specColour, float &eta) {
-    glm::vec3 woL = glm::normalize(worldToLocal * woW);
-
-    if (cosTheta(woL) <= 0.0f) {
-        wiW = glm::vec3(0.0f);
-    }
+    // The shading normal is face-forwarded before scatterRay dispatches, so
+    // cosTheta(woL) > 0 holds here; no invalid-hemisphere guard is needed.
 
     // Note that glm::reflect equation is woW - 2 * glm::dot(woW, normal) * normal
     // Instead of normally what we would have: 2 * glm::dot(woW, normal) * normal - woW
@@ -197,8 +200,11 @@ __host__ __device__ glm::vec3 sampleDielectric(const glm::vec3 normal, glm::mat3
     float indexRatio_sq = indexRatio * indexRatio;
     float cosThetaWoL_sq = cosThetaWoL * cosThetaWoL;
     float weightN = glm::max(0.0f, 1 - indexRatio_sq * (1 - cosThetaWoL_sq));
-    
-    if (sample1D <= F || weightN < 0.0f) {
+
+    // Reflect on a Fresnel coin-flip. Total internal reflection needs no
+    // separate test: fresnel() already returns F = 1 there (so sample1D <= F is
+    // always true) and weightN collapses to 0.
+    if (sample1D <= F) {
         glm::vec3 c = sampleMirror(normal, worldToLocal, woW, wiW, specColour, eta);
         eta = eta1; // Put this line after the sampleMirror function call becasue sampleMirror changes eta to 1.0f
         return c;
@@ -211,33 +217,37 @@ __host__ __device__ glm::vec3 sampleDielectric(const glm::vec3 normal, glm::mat3
     }
 }
 
-__host__ __device__ glm::vec3 sampleMicrofacet(const glm::vec3 &normal, const glm::mat3 &worldToLocal, const glm::mat3 &localToWorld, const glm::vec3 &woW, const glm::vec3 &m_kd, const float m_ks, const float roughness, const float m_extIOR, const float m_intIOR, const glm::vec2 sample2D, glm::vec3 &wiW, float &pdf, float &eta) {
+__host__ __device__ glm::vec3 sampleMicrofacet(const glm::vec3 &normal, const glm::mat3 &worldToLocal, const glm::mat3 &localToWorld, const glm::vec3 &woW, const glm::vec3 &m_kd, const float m_ks, const glm::vec3 &specColour, const float roughness, const float m_extIOR, const float m_intIOR, const glm::vec2 sample2D, glm::vec3 &wiW, float &pdf, float &eta) {
     glm::vec3 woL = glm::normalize(worldToLocal * woW);
     glm::vec3 wiL;
     glm::vec2 sample;
 
+    // Pick a lobe: specular with probability m_ks, diffuse with probability
+    // (1 - m_ks). This must match the mixture in pdfMicrofacet. Each branch
+    // reuses sample2D.x (remapped back to [0,1]) so no extra random is spent.
     if (sample2D.x < m_ks) {
-        sample = glm::vec2((sample2D.x - m_ks) / (1 - m_ks), sample2D.y);
-        wiW = glm::normalize(squareToCosineHemisphere(sample, normal));
-        wiL = glm::normalize(worldToLocal * wiW);
-    }
-    else {
         sample = glm::vec2(sample2D.x / m_ks, sample2D.y);
         glm::vec3 n = squareToBeckmann(sample, roughness);
         wiL = glm::reflect(-woL, n);
         wiW = glm::normalize(localToWorld * wiL);
+    }
+    else {
+        sample = glm::vec2((sample2D.x - m_ks) / (1 - m_ks), sample2D.y);
+        wiW = glm::normalize(squareToCosineHemisphere(sample, normal));
+        wiL = glm::normalize(worldToLocal * wiW);
     }
 
     eta = 1.0f;
 
     float cosTheta_wiL = cosTheta(wiL);
     if (cosTheta_wiL <= 0.0f || cosTheta(woL) <= 0.0f) {
+        pdf = 0.0f;
         return glm::vec3(0.0f);
     }
 
     glm::vec3 whL = glm::normalize(wiL + woL);
     pdf = pdfMicrofacet(m_ks, roughness, woL, wiL, whL);
 
-    return evalMicrofacet(woL, wiL, whL, roughness, m_extIOR, m_intIOR, m_kd, m_ks) * cosTheta_wiL / pdf;
+    return evalMicrofacet(woL, wiL, whL, roughness, m_extIOR, m_intIOR, m_kd, m_ks, specColour) * cosTheta_wiL / pdf;
 }
 /*****************************************************************************/

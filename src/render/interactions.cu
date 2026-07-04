@@ -69,6 +69,15 @@ __host__ __device__ void scatterRay(
             glm::normalize(actualNormal + du * tbn[0] + dv * tbn[1]);
     }
 
+    // Rebuild the shading frame around the (possibly normal/bump-mapped) normal
+    // so the sampled direction and the pdf reported for it share one frame --
+    // otherwise the pdf carried into the MIS weight is inconsistent with the
+    // sample. With no normal/bump map actualNormal == normal, so this exactly
+    // reproduces the frame built above.
+    worldToLocal = WorldToLocal(actualNormal);
+    localToWorld = LocalToWorld(actualNormal);
+    woL = worldToLocal * woW;
+
     // note: this is where sorting the intersections by material is going to come in very handy
     if (m.type == MatType::DIFFUSE) {
         c = sampleDiffuse(actualAlbedo, actualNormal, sample2D, wiW, eta);
@@ -91,6 +100,47 @@ __host__ __device__ void scatterRay(
         glm::vec3 m_kd = (1.0f - m_ks) * actualAlbedo;
 
         // Given that sampleMicrofacet also calculates the pdf, we can just pass it in as a parameter
-        c = sampleMicrofacet(actualNormal, worldToLocal, localToWorld, woW, m_kd, m_ks, m.roughness, EXT_IOR, m.indexOfRefraction, sample2D, wiW, pdf, eta);
+        c = sampleMicrofacet(actualNormal, worldToLocal, localToWorld, woW, m_kd, m_ks, m.specularColor, m.roughness, EXT_IOR, m.indexOfRefraction, sample2D, wiW, pdf, eta);
     }
+}
+
+__host__ __device__ void evalBSDF(glm::vec3 woW, glm::vec3 normal,
+                                  glm::vec3 tangent, glm::vec3 wiW,
+                                  const Material &m,
+                                  const TextureValues &texVals, glm::vec3 &f,
+                                  float &pdf) {
+    f = glm::vec3(0.0f);
+    pdf = 0.0f;
+
+    // Match scatterRay's frame handling so the pdf returned here is consistent
+    // with the one the sampler would produce (needed for a correct MIS weight).
+    if (m.type != MatType::DIELECTRIC && glm::dot(normal, woW) < 0.0f) {
+        normal = -normal;
+    }
+    glm::mat3 worldToLocal = WorldToLocal(normal);
+
+    glm::vec3 actualAlbedo = m.color;
+    if (texVals.albedo != glm::vec4(INFINITY)) {
+        actualAlbedo = glm::vec3(texVals.albedo);
+    }
+
+    glm::vec3 woL = worldToLocal * woW;
+    glm::vec3 wiL = worldToLocal * wiW;
+
+    if (m.type == MatType::DIFFUSE) {
+        f = evalDiffuse(actualAlbedo, woL, wiL);
+        pdf = pdfDiffuse(woL, wiL);
+    } else if (m.type == MatType::MICROFACET) {
+        if (cosTheta(woL) > 0.0f && cosTheta(wiL) > 0.0f) {
+            float tmp = (EXT_IOR - m.indexOfRefraction) /
+                        (EXT_IOR + m.indexOfRefraction);
+            float m_ks = tmp * tmp;
+            glm::vec3 m_kd = (1.0f - m_ks) * actualAlbedo;
+            glm::vec3 whL = glm::normalize(woL + wiL);
+            f = evalMicrofacet(woL, wiL, whL, m.roughness, EXT_IOR,
+                               m.indexOfRefraction, m_kd, m_ks, m.specularColor);
+            pdf = pdfMicrofacet(m_ks, m.roughness, woL, wiL, whL);
+        }
+    }
+    // MIRROR / DIELECTRIC: delta lobes, leave f = 0, pdf = 0.
 }

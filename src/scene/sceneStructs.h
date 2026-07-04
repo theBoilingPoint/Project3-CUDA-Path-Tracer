@@ -182,6 +182,34 @@ struct EnvironmentMap {
     int valid;
     float intensity;
     float rotation; // Yaw around the +Y axis, in radians (rotates the map)
+
+    // Importance-sampling distribution (NEE + MIS). Device pointers to the
+    // PBRT-style piecewise-constant 2D distribution built in Scene: one
+    // conditional CDF per row over columns (h*(width+1) entries) and one
+    // marginal CDF over rows (height+1 entries), both normalized to [0, 1].
+    // `distValid` is 0 when no distribution is present (env sampling disabled).
+    int width;
+    int height;
+    const float *conditionalCdf;
+    const float *marginalCdf;
+    int distValid;
+};
+
+// Delta (singular) lights: point and directional. These cannot be hit by BSDF
+// sampling, so they are handled purely by next-event estimation (a shadow ray),
+// with no MIS weight. Distinct from emissive *geometry* (area lights).
+enum DeltaLightType { POINT_LIGHT, DIRECTIONAL_LIGHT };
+
+struct DeltaLight {
+    int type; // DeltaLightType
+    // POINT: world position. DIRECTIONAL: unused.
+    glm::vec3 position;
+    // DIRECTIONAL: normalized direction the light travels (points away from the
+    // source toward the scene). POINT: unused.
+    glm::vec3 direction;
+    // POINT: radiant intensity (W/sr); illuminance falls off as 1/dist^2.
+    // DIRECTIONAL: radiance (constant, no falloff).
+    glm::vec3 radiance;
 };
 /*****************************************************************************************************************************/
 
@@ -208,10 +236,20 @@ struct RenderState {
 
 struct PathSegment {
     Ray ray;
-    glm::vec3 color;
+    glm::vec3 color; // Path throughput (product of BSDF weights along the path)
+    // Accumulated radiance for this path. Emitter/env hits and NEE add into
+    // this (throughput * incoming radiance * MIS weight); finalGather reads it.
+    // Separated from throughput so next-event estimation can add direct-light
+    // contributions mid-path without terminating.
+    glm::vec3 radiance;
     int pixelIndex;
     int remainingBounces;
     bool hasHitLight;
+    // MIS bookkeeping for the ray currently being traced: the solid-angle pdf
+    // of the BSDF bounce that produced it, and whether that bounce was a
+    // specular/delta event (env seen through it gets full weight, no NEE).
+    float bsdfPdf;
+    bool specularBounce;
     float eta; // Used for Russian roulette to determine how likely this ray
                // survives
 };
@@ -229,4 +267,8 @@ struct ShadeableIntersection {
     glm::vec3 surfaceTangent; // World-space UV tangent (zero if unavailable)
     glm::vec2 uv;
     MaterialIDs materials;
+    // Index of the hit geom in the scene's geoms array (-1 on a miss). Lets the
+    // shader recover the emitter's geometry (to compute its area for the
+    // area-light MIS weight when a BSDF ray lands on an emissive surface).
+    int hitGeomIndex;
 };

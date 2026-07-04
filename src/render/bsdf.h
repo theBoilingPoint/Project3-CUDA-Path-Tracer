@@ -29,12 +29,12 @@ __host__ __device__ float pdfMicrofacet(const float m_ks, const float roughness,
 __host__ __device__ glm::vec3 evalDiffuse(const glm::vec3 &albedo, const glm::vec3 &woL, const glm::vec3 &wiL);
 __host__ __device__ glm::vec3 evalMirror();
 __host__ __device__ glm::vec3 evalDielectric();
-__host__ __device__ glm::vec3 evalMicrofacet(const glm::vec3 &woL, const glm::vec3 &wiL, const glm::vec3 &whL, const float roughness, const float m_extIOR, const float m_intIOR, const glm::vec3 &m_kd, const float m_ks);
+__host__ __device__ glm::vec3 evalMicrofacet(const glm::vec3 &woL, const glm::vec3 &wiL, const glm::vec3 &whL, const float roughness, const float m_extIOR, const float m_intIOR, const glm::vec3 &m_kd, const float m_ks, const glm::vec3 &specColour);
 /*****************************************************************************/
 
 /** Bounce Directions and Return Colours */
 __host__ __device__ glm::vec3 sampleDiffuse(const glm::vec3 &albedo, const glm::vec3 &normal, const glm::vec2 &sample2D, glm::vec3 &wiW, float &eta);
 __host__ __device__ glm::vec3 sampleMirror(const glm::vec3 &normal, const glm::mat3 &worldToLocal, const glm::vec3 &woW, glm::vec3 &wiW, const glm::vec3 &specColour, float &eta);
 __host__ __device__ glm::vec3 sampleDielectric(const glm::vec3 normal, glm::mat3 &worldToLocal, const glm::mat3 &localToWorld, const glm::vec3 &woW, const float sample1D, const float m_extIOR, const float m_intIOR, const glm::vec3 specColour, glm::vec3 &wiW, float &eta);
-__host__ __device__ glm::vec3 sampleMicrofacet(const glm::vec3 &normal, const glm::mat3 &worldToLocal, const glm::mat3 &localToWorld, const glm::vec3 &woW, const glm::vec3 &m_kd, const float m_ks, const float roughness, const float m_extIOR, const float m_intIOR, const glm::vec2 sample2D, glm::vec3 &wiW, float &pdf, float &eta);
+__host__ __device__ glm::vec3 sampleMicrofacet(const glm::vec3 &normal, const glm::mat3 &worldToLocal, const glm::mat3 &localToWorld, const glm::vec3 &woW, const glm::vec3 &m_kd, const float m_ks, const glm::vec3 &specColour, const float roughness, const float m_extIOR, const float m_intIOR, const glm::vec2 sample2D, glm::vec3 &wiW, float &pdf, float &eta);
 /*****************************************************************************/

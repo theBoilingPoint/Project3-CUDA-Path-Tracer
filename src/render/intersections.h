@@ -86,9 +86,7 @@ meshIntersectionTestNaive(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
  *
  * @return float World-space distance to the hit. -1 if no intersection.
  */
-__host__ __device__ float meshIntersectionTestBVH(Geom mesh, Ray r,
-                                                  glm::vec3 &intersectionPoint,
-                                                  glm::vec3 &normal,
-                                                  glm::vec3 &geometricNormal,
-                                                  glm::vec3 &tangent,
-                                                  glm::vec2 &uv, bool &outside);
+__host__ __device__ float
+meshIntersectionTestBVH(Geom mesh, Ray r, glm::vec3 &intersectionPoint,
+                        glm::vec3 &normal, glm::vec3 &geometricNormal,
+                        glm::vec3 &tangent, glm::vec2 &uv, bool &outside);

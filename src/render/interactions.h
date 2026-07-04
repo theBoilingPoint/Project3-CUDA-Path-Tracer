@@ -52,3 +52,19 @@ __host__ __device__ void scatterRay(
     const Material& m,
     const TextureValues& texVals,
     thrust::default_random_engine& rng);
+
+// Evaluate the BSDF value f(woW, wiW) and its solid-angle sampling pdf for a
+// *given* incident direction wiW (as opposed to scatterRay, which samples one).
+// Needed for next-event estimation + MIS: we sample a direction toward the
+// environment light and must know both f and the pdf the BSDF sampler would
+// have used for that direction. Delta materials (mirror/dielectric) return
+// f = 0, pdf = 0 since they cannot be evaluated for an arbitrary direction.
+__host__ __device__ void evalBSDF(
+    glm::vec3 woW,
+    glm::vec3 normal,
+    glm::vec3 tangent,
+    glm::vec3 wiW,
+    const Material& m,
+    const TextureValues& texVals,
+    glm::vec3 &f,
+    float &pdf);

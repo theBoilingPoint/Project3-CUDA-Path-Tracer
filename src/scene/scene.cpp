@@ -72,6 +72,74 @@ Scene::~Scene() {
     envMap = nullptr;
 }
 
+// Builds a PBRT-style piecewise-constant 2D distribution over the loaded
+// equirectangular env map for importance sampling (NEE + MIS). The per-pixel
+// importance is luminance * sin(theta), where theta = pi * (row + 0.5) / height
+// is the polar angle; the sin(theta) factor is the lat-long solid-angle
+// Jacobian, so bright pixels crammed near the poles are not over-weighted.
+//
+// Layout matches Distribution2D: one conditional CDF per row over columns
+// (u | v), and one marginal CDF over rows (v). Both are normalized to [0, 1].
+// With that normalization, all sampling/pdf math on the device reduces to
+// scaled CDF differences (see envPdf/sampleEnvDirection in pathtrace.cu), so we
+// don't need to also upload the raw function or its integrals.
+void Scene::buildEnvDistribution() {
+    const int w = envMapSize.x;
+    const int h = envMapSize.y;
+    if (!hasEnvMap || envMap == nullptr || w <= 0 || h <= 0) {
+        return;
+    }
+
+    envConditionalCdf.assign((size_t)h * (w + 1), 0.0f);
+    envMarginalCdf.assign((size_t)h + 1, 0.0f);
+
+    // Per-row (marginal) function values = each row's unnormalized integral.
+    std::vector<float> marginalFunc(h, 0.0f);
+
+    for (int y = 0; y < h; ++y) {
+        const float theta = PI * ((float)y + 0.5f) / (float)h;
+        const float sinTheta = sinf(theta);
+        float *cdf = &envConditionalCdf[(size_t)y * (w + 1)];
+
+        cdf[0] = 0.0f;
+        for (int x = 0; x < w; ++x) {
+            const glm::vec4 &px = envMap[(size_t)y * w + x];
+            const float lum = 0.2126f * px.r + 0.7152f * px.g + 0.0722f * px.b;
+            const float f = lum * sinTheta;     // importance
+            cdf[x + 1] = cdf[x] + f / (float)w; // running integral / n
+        }
+
+        const float rowInt = cdf[w];
+        marginalFunc[y] = rowInt;
+        if (rowInt > 0.0f) {
+            for (int x = 1; x <= w; ++x) {
+                cdf[x] /= rowInt; // normalize row CDF to [0, 1]
+            }
+        } else {
+            // Black row: fall back to a uniform CDF so sampling stays valid.
+            for (int x = 1; x <= w; ++x) {
+                cdf[x] = (float)x / (float)w;
+            }
+        }
+    }
+
+    envMarginalCdf[0] = 0.0f;
+    for (int y = 0; y < h; ++y) {
+        envMarginalCdf[y + 1] = envMarginalCdf[y] + marginalFunc[y] / (float)h;
+    }
+    const float total = envMarginalCdf[h];
+    if (total > 0.0f) {
+        for (int y = 1; y <= h; ++y) {
+            envMarginalCdf[y] /= total;
+        }
+    } else {
+        // Fully black map: uniform marginal (importance sampling is a no-op).
+        for (int y = 1; y <= h; ++y) {
+            envMarginalCdf[y] = (float)y / (float)h;
+        }
+    }
+}
+
 void Scene::loadMesh(const std::string &filepath, Mesh &mesh) {
     if (endsWith(filepath, ".obj")) {
         printf("Loading OBJ file: %s\n", filepath.c_str());
@@ -262,23 +330,59 @@ void Scene::loadFromJSON(const std::string &jsonName) {
             exit(-1);
         }
 
-        // Resolve the path relative to the scene JSON file, like other textures.
+        // Resolve the path relative to the scene JSON file, like other
+        // textures.
         std::filesystem::path envPath(env["TEXTURE_PATH"].get<std::string>());
         if (envPath.is_relative()) {
             envPath = std::filesystem::path(jsonName).parent_path() / envPath;
         }
         loadHDRTexture(envPath.string(), envMap, envMapSize);
-        envMapIntensity = env.contains("INTENSITY")
-                              ? env["INTENSITY"].get<float>()
-                              : 1.0f;
+        envMapIntensity =
+            env.contains("INTENSITY") ? env["INTENSITY"].get<float>() : 1.0f;
         // ROTATION is authored in degrees (yaw around +Y); store radians.
         envMapRotation = env.contains("ROTATION")
                              ? env["ROTATION"].get<float>() * (PI / 180.0f)
                              : 0.0f;
         hasEnvMap = true;
-        printf("Environment map loaded (%dx%d, intensity %f, rotation %f deg)\n",
-               envMapSize.x, envMapSize.y, envMapIntensity,
-               envMapRotation * (180.0f / PI));
+        buildEnvDistribution();
+        printf(
+            "Environment map loaded (%dx%d, intensity %f, rotation %f deg)\n",
+            envMapSize.x, envMapSize.y, envMapIntensity,
+            envMapRotation * (180.0f / PI));
+    }
+
+    // Reading optional delta (point/directional) lights. These are singular
+    // lights sampled only by next-event estimation (no geometry to hit).
+    if (data.contains("Lights")) {
+        for (const auto &l : data["Lights"]) {
+            DeltaLight light{};
+            const std::string ltype = l.value("TYPE", std::string("Point"));
+            glm::vec3 rgb(1.0f);
+            if (l.contains("RGB")) {
+                rgb = glm::vec3(l["RGB"][0], l["RGB"][1], l["RGB"][2]);
+            }
+            float intensity = l.value("INTENSITY", 1.0f);
+            light.radiance = rgb * intensity;
+
+            if (ltype == "Directional") {
+                light.type = DIRECTIONAL_LIGHT;
+                glm::vec3 dir(0.0f, -1.0f, 0.0f);
+                if (l.contains("DIRECTION")) {
+                    dir = glm::vec3(l["DIRECTION"][0], l["DIRECTION"][1],
+                                    l["DIRECTION"][2]);
+                }
+                light.direction = glm::normalize(dir);
+            } else { // Point
+                light.type = POINT_LIGHT;
+                if (l.contains("POSITION")) {
+                    light.position = glm::vec3(
+                        l["POSITION"][0], l["POSITION"][1], l["POSITION"][2]);
+                }
+            }
+            deltaLights.push_back(light);
+        }
+        printf("Loaded %zu delta (point/directional) light(s)\n",
+               deltaLights.size());
     }
 
     // Reading objects
@@ -464,10 +568,11 @@ void Scene::loadFromJSON(const std::string &jsonName) {
         }
     }
 
-    if (lights.size() == 0 && !hasEnvMap) {
-        std::cerr << "No lights and no environment map found in the scene, your "
-                     "render will be pitch black!"
-                  << std::endl;
+    if (lights.size() == 0 && !hasEnvMap && deltaLights.empty()) {
+        std::cerr
+            << "No lights and no environment map found in the scene, your "
+               "render will be pitch black!"
+            << std::endl;
         exit(-1);
     }
 

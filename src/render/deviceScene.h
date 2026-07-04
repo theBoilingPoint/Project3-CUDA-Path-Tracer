@@ -35,6 +35,9 @@ struct DeviceScene {
     Texture *normalTextures = nullptr;
     Texture *bumpTextures = nullptr;
 
+    // Delta (point/directional) lights, sampled by NEE only. May be null/empty.
+    DeltaLight *deltaLights = nullptr;
+
     // Equirectangular HDR environment map (valid == 0 when none configured).
     // Backed by a texture resource tracked in `textureResources` for teardown.
     EnvironmentMap envMap = {};
