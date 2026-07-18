@@ -2,7 +2,63 @@
 
 #include <glm/gtc/matrix_inverse.hpp>
 
+#include "spectrumData.h" // illuminantRGB / blackbodyLuminanceNorm
+
 #define USE_SELF_LOADED_TEXTURES 1
+
+// Parse an optional "SPECTRUM" field on an emitter or delta light:
+//   "SPECTRUM": "D65" | "A" | "E"          (named illuminants)
+//   "SPECTRUM": {"BLACKBODY": <kelvin>}    (Planck radiator)
+// In SPECTRAL builds the light emits that SPD (times its RGB tint, times
+// EMITTANCE/INTENSITY); blackbodyNorm is filled so the device can normalize
+// Planck to unit luminance. In RGB builds the illuminant's RGB equivalent is
+// folded into `rgb` instead, approximating the spectral look.
+template <typename JsonT>
+static void parseSpectrum(const JsonT &p, glm::vec3 &rgb, int &spectrumType,
+                          float &blackbodyTemp, float &blackbodyNorm) {
+    spectrumType = SPECTRUM_NONE;
+    blackbodyTemp = 0.0f;
+    blackbodyNorm = 0.0f;
+    if (!p.contains("SPECTRUM")) {
+        return;
+    }
+    const auto &s = p["SPECTRUM"];
+    if (s.is_string()) {
+        const std::string name = s;
+        if (name == "D65") {
+            spectrumType = SPECTRUM_D65;
+        } else if (name == "A") {
+            spectrumType = SPECTRUM_A;
+        } else if (name == "E") {
+            spectrumType = SPECTRUM_E;
+        } else {
+            printf("Unknown SPECTRUM \"%s\" (expected \"D65\", \"A\", \"E\" or "
+                   "{\"BLACKBODY\": kelvin}).\n",
+                   name.c_str());
+            exit(-1);
+        }
+    } else if (s.is_object() && s.contains("BLACKBODY")) {
+        float kelvin = (float)s["BLACKBODY"];
+        if (kelvin <= 0.0f) {
+            printf("SPECTRUM BLACKBODY temperature must be > 0 K.\n");
+            exit(-1);
+        }
+        spectrumType = SPECTRUM_BLACKBODY;
+        blackbodyTemp = kelvin;
+        blackbodyNorm = blackbodyLuminanceNorm(kelvin);
+    } else {
+        printf("Malformed SPECTRUM field (expected \"D65\", \"A\", \"E\" or "
+               "{\"BLACKBODY\": kelvin}).\n");
+        exit(-1);
+    }
+#if !SPECTRAL
+    // RGB build: approximate the illuminant by tinting the light's RGB color.
+    rgb *= illuminantRGB(spectrumType, blackbodyTemp);
+    spectrumType = SPECTRUM_NONE;
+    blackbodyTemp = 0.0f;
+    blackbodyNorm = 0.0f;
+#endif
+}
 
 Mesh::Mesh() {}
 
@@ -176,6 +232,8 @@ void Scene::loadFromJSON(const std::string &jsonName) {
             const auto &col = p["RGB"];
             newMaterial.color = glm::vec3(col[0], col[1], col[2]);
             newMaterial.emittance = p["EMITTANCE"];
+            parseSpectrum(p, newMaterial.color, newMaterial.spectrumType,
+                          newMaterial.blackbodyTemp, newMaterial.blackbodyNorm);
         } else if (p["TYPE"] == "Mirror") {
             if (!p.contains("SPEC_RGB")) {
                 printf("You define a mirror material but you haven't specified "
@@ -211,6 +269,13 @@ void Scene::loadFromJSON(const std::string &jsonName) {
             newMaterial.specularColor =
                 glm::vec3(spec_col[0], spec_col[1], spec_col[2]);
             newMaterial.indexOfRefraction = p["IOR"];
+            // Optional dispersion (SPECTRAL builds): Abbe number V of the
+            // glass; IOR is then interpreted as n_d (at the 587.6 nm d-line).
+            // References: BK7 crown 64.17, SF11 flint 25.68, diamond 55.3.
+            // 0 (absent) keeps the wavelength-independent behavior.
+            if (p.contains("ABBE")) {
+                newMaterial.abbe = (float)p["ABBE"];
+            }
         } else if (p["TYPE"] == "Microfacet") {
             if (!p.contains("RGB")) {
                 printf("You define a microfacet material but you haven't "
@@ -361,6 +426,8 @@ void Scene::loadFromJSON(const std::string &jsonName) {
             if (l.contains("RGB")) {
                 rgb = glm::vec3(l["RGB"][0], l["RGB"][1], l["RGB"][2]);
             }
+            parseSpectrum(l, rgb, light.spectrumType, light.blackbodyTemp,
+                          light.blackbodyNorm);
             float intensity = l.value("INTENSITY", 1.0f);
             light.radiance = rgb * intensity;
 
@@ -560,7 +627,13 @@ void Scene::loadFromJSON(const std::string &jsonName) {
 
         geoms.push_back(newGeom);
         geomMeshData.push_back(newMeshData);
-        if (mat == "light") {
+        // Register every emissive object as an area light so next-event
+        // estimation can sample it. This must go by EMITTANCE, not by the
+        // material being named "light": an emitter that NEE cannot sample
+        // would still be MIS-down-weighted when a BSDF ray hits it (losing
+        // energy), and multi-emitter scenes need distinct material names
+        // (e.g. the per-spectrum light panels in the spectral demo scenes).
+        if (materials[newGeom.material.materialId].emittance > 0.0f) {
             lights.push_back(newGeom);
             // Non-owning copy: shares geomMeshData's host pointers (freed once,
             // via geomMeshData).
@@ -591,6 +664,15 @@ void Scene::loadFromJSON(const std::string &jsonName) {
     camera.position = glm::vec3(pos[0], pos[1], pos[2]);
     camera.lookAt = glm::vec3(lookat[0], lookat[1], lookat[2]);
     camera.up = glm::vec3(up[0], up[1], up[2]);
+
+    // Default to no depth of field. These MUST be written even when the JSON
+    // omits them: Camera is a plain struct with no initializers, so leaving
+    // them untouched reads uninitialized memory -- when that garbage happened
+    // to be positive, generateRayFromCamera enabled DOF with an absurd lens
+    // radius and every camera ray missed the scene (intermittent all-black
+    // renders that came and went with unrelated heap-layout changes).
+    camera.lensRadius = 0.0f;
+    camera.focalDistance = 0.0f;
 
     if (!cameraData.contains("LENS_RADIUS")) {
         printf("You haven't specified "

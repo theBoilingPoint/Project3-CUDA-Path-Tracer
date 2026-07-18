@@ -13,6 +13,7 @@
 #include "intersections.h"
 #include "scene.h"
 #include "sceneStructs.h"
+#include "spectrumData.h"
 #include "utilities.h"
 
 #include <thrust/device_ptr.h>
@@ -47,6 +48,9 @@
 // Tune FIREFLY_CLAMP_MAX up if highlights look dim, down if speckle remains.
 #define USE_FIREFLY_CLAMP 0
 #define FIREFLY_CLAMP_MAX 8.0f
+
+// Spectral (hero-wavelength) vs RGB transport is a cross-file switch and
+// therefore does NOT live here: see SPECTRAL in src/render/spectral.h.
 
 static Scene *hst_scene = NULL;
 static GuiDataContainer *guiData = NULL;
@@ -200,8 +204,13 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth,
     // Assign values to the path segment
     segment.ray.origin = rayOrigin;
     segment.ray.direction = rayDirection;
-    segment.color = glm::vec3(1.0f);    // throughput
-    segment.radiance = glm::vec3(0.0f); // accumulated light
+    segment.color = Spectrum(1.0f);    // throughput
+    segment.radiance = Spectrum(0.0f); // accumulated light
+#if SPECTRAL
+    // Hero wavelength + 3 stratified companions for this path. Guarded so RGB
+    // builds draw the exact same RNG sequence as before (bit-identical images).
+    segment.swl = sampleWavelengths(u01(rng));
+#endif
     segment.pixelIndex = index;
     segment.remainingBounces = traceDepth;
     segment.hasHitLight = false;
@@ -649,6 +658,136 @@ __device__ glm::vec3 checkerboard(float u, float v, int checkerSize) {
     }
 }
 
+// ============================================================================
+// RGB <-> Spectrum seam. RGB values (materials, textures, env map, lights)
+// enter spectrum-land ONLY through the two uplift functions below, and leave
+// it only through spectrumToRGB in finalGather. In RGB builds all three are
+// identity pass-throughs, so the shading code needs no #if forks.
+// ============================================================================
+#if SPECTRAL
+
+// Nearest 1nm CIE table bin for a wavelength in [LAMBDA_MIN, LAMBDA_MAX].
+__device__ inline int cieBin(float lambda) {
+    int bin = (int)(lambda + 0.5f) - (int)LAMBDA_MIN; // lambda > 0: trunc == round
+    return min(max(bin, 0), N_CIE_BINS - 1);
+}
+
+// Reflectance (bounded [0,1]) RGB -> spectrum sampled at the path wavelengths,
+// via the Jakob & Hanika 2019 sigmoid-polynomial model: one coefficient fetch
+// per RGB value, then ~6 flops per wavelength.
+__device__ Spectrum upliftReflectance(const glm::vec3 &rgb,
+                                      const SampledWavelengths &swl) {
+    float coeff[3];
+    rs_fetchCoeffs(c_spectral.rgb2specData, c_spectral.rgb2specScale,
+                   c_spectral.rgb2specRes, rgb, coeff);
+    Spectrum s;
+#pragma unroll
+    for (int i = 0; i < NSpectrumSamples; ++i) {
+        s[i] = rs_evalSigmoid(coeff, swl.lambda[i]);
+    }
+    return s;
+}
+
+// Named illuminant SPD at a wavelength. All illuminants are normalized to unit
+// luminance, so an emitter's EMITTANCE means the same brightness for each.
+// SPECTRUM_NONE and SPECTRUM_D65 both yield D65: uplifted RGB emission is
+// defined relative to sRGB's whitepoint, which IS D65 (PBRT's
+// RGBIlluminantSpectrum convention). Blackbody is analytic Planck scaled by
+// the host-computed unit-luminance normalization (blackbodyNorm).
+__device__ inline float illuminantSPD(int spectrumType, float blackbodyTemp,
+                                      float blackbodyNorm, float lambda) {
+    switch (spectrumType) {
+        case SPECTRUM_A:
+            return c_spectral.illumA[cieBin(lambda)];
+        case SPECTRUM_E:
+            // Equal energy, luminance-normalized: 1/(CIE_Y_INTEGRAL/N) per nm.
+            return (float)N_CIE_BINS / CIE_Y_INTEGRAL;
+        case SPECTRUM_BLACKBODY:
+            return planckSPD(lambda, blackbodyTemp) * blackbodyNorm;
+        case SPECTRUM_NONE:
+        case SPECTRUM_D65:
+        default:
+            return c_spectral.d65[cieBin(lambda)];
+    }
+}
+
+// Emission (unbounded) RGB -> spectrum sampled at the path wavelengths.
+// PBRT RGBIlluminantSpectrum: normalize the RGB into the sigmoid model's
+// [0,1] domain, uplift, then rescale and multiply by the illuminant SPD.
+// Exactly homogeneous in scale: uplift(k*rgb) == k*uplift(rgb), so scalar
+// factors (EMITTANCE, 1/dist^2 falloff) pass through unchanged.
+__device__ Spectrum upliftIlluminant(const glm::vec3 &rgb,
+                                     const SampledWavelengths &swl,
+                                     int spectrumType, float blackbodyTemp,
+                                     float blackbodyNorm) {
+    float m = fmaxf(rgb.x, fmaxf(rgb.y, rgb.z));
+    if (m <= 0.0f) {
+        return Spectrum(0.0f);
+    }
+    float scale = 2.0f * m;
+    float coeff[3];
+    rs_fetchCoeffs(c_spectral.rgb2specData, c_spectral.rgb2specScale,
+                   c_spectral.rgb2specRes, rgb / scale, coeff);
+    Spectrum s;
+#pragma unroll
+    for (int i = 0; i < NSpectrumSamples; ++i) {
+        s[i] = rs_evalSigmoid(coeff, swl.lambda[i]) * scale *
+               illuminantSPD(spectrumType, blackbodyTemp, blackbodyNorm,
+                             swl.lambda[i]);
+    }
+    return s;
+}
+
+// Sensor: Monte Carlo estimate of the path's radiance spectrum -> CIE XYZ
+// (via the 1931 color matching functions and the wavelength sampling pdfs)
+// -> linear sRGB. Terminated secondary wavelengths contribute 0 (their pdf is
+// 0); the hero pdf was pre-divided by N to compensate.
+__device__ glm::vec3 spectrumToRGB(const Spectrum &L,
+                                   const SampledWavelengths &swl) {
+    glm::vec3 xyz(0.0f);
+#pragma unroll
+    for (int i = 0; i < NSpectrumSamples; ++i) {
+        float p = swl.pdf[i];
+        if (p <= 0.0f) {
+            continue;
+        }
+        int bin = cieBin(swl.lambda[i]);
+        float w = L[i] / p;
+        xyz.x += c_spectral.cieX[bin] * w;
+        xyz.y += c_spectral.cieY[bin] * w;
+        xyz.z += c_spectral.cieZ[bin] * w;
+    }
+    xyz /= (float)NSpectrumSamples * CIE_Y_INTEGRAL;
+    // XYZ -> linear sRGB (D65 whitepoint; same matrix as rgb2spec's
+    // details/cie1931.h, which generated the coefficient table). Out-of-gamut
+    // spectra (e.g. dispersed highlights) can go negative; the accumulation
+    // buffer is signed float and display/save clamp at the end.
+    return glm::vec3(
+        3.240479f * xyz.x - 1.537150f * xyz.y - 0.498535f * xyz.z,
+        -0.969256f * xyz.x + 1.875991f * xyz.y + 0.041556f * xyz.z,
+        0.055648f * xyz.x - 0.204043f * xyz.y + 1.057311f * xyz.z);
+}
+
+#else // !SPECTRAL: identity pass-throughs
+
+__device__ Spectrum upliftReflectance(const glm::vec3 &rgb,
+                                      const SampledWavelengths &) {
+    return rgb;
+}
+
+__device__ Spectrum upliftIlluminant(const glm::vec3 &rgb,
+                                     const SampledWavelengths &, int, float,
+                                     float) {
+    return rgb;
+}
+
+__device__ glm::vec3 spectrumToRGB(const Spectrum &L,
+                                   const SampledWavelengths &) {
+    return L;
+}
+
+#endif // SPECTRAL
+
 __global__ void shade(int iter, int depth, int num_paths,
                       ShadeableIntersection *shadeableIntersections,
                       PathSegment *pathSegments, Material *materials,
@@ -680,7 +819,9 @@ __global__ void shade(int iter, int depth, int num_paths,
         // they take full weight.
         if (envMap.valid) {
             glm::vec3 dir = pathSegment.ray.direction;
-            glm::vec3 Le = sampleEnvironment(envMap, dir);
+            Spectrum Le =
+                upliftIlluminant(sampleEnvironment(envMap, dir),
+                                 pathSegment.swl, SPECTRUM_NONE, 0.0f, 0.0f);
             float weight = 1.0f;
 #if USE_MIS
             if (!pathSegment.specularBounce && envMap.distValid) {
@@ -745,7 +886,10 @@ __global__ void shade(int iter, int depth, int num_paths,
         // same direction. Full weight when NEE couldn't have taken it: a
         // specular/ primary ray, an unsupported (area == 0) emitter, or no
         // lights.
-        glm::vec3 Le = materialColor * material.emittance;
+        Spectrum Le = upliftIlluminant(materialColor * material.emittance,
+                                       pathSegment.swl, material.spectrumType,
+                                       material.blackbodyTemp,
+                                       material.blackbodyNorm);
         float weight = 1.0f;
 #if USE_MIS
         if (!pathSegment.specularBounce && numLights > 0 &&
@@ -775,7 +919,7 @@ __global__ void shade(int iter, int depth, int num_paths,
         glm::vec3 surfaceTangent = intersection.surfaceTangent;
         glm::vec3 woW = -pathSegment.ray.direction;
         glm::vec3 wiW;
-        glm::vec3 c;
+        Spectrum c;
         float pdf;
         float eta;
 
@@ -788,6 +932,20 @@ __global__ void shade(int iter, int depth, int num_paths,
 
         bool isSpecular = (material.type == MatType::MIRROR ||
                            material.type == MatType::DIELECTRIC);
+
+        // Resolve the surface's reflectance inputs once for every BSDF call
+        // below (the NEE evaluations and the scatter). An albedo texture
+        // overrides the material's base color; this resolution used to be
+        // duplicated inside scatterRay and evalBSDF. In SPECTRAL builds the
+        // resolved RGB values are uplifted to spectra here -- the single point
+        // where reflectance RGB enters spectrum-land.
+        glm::vec3 rgbAlbedo = materialColor;
+        if (texVals.albedo != glm::vec4(INFINITY)) {
+            rgbAlbedo = glm::vec3(texVals.albedo);
+        }
+        Spectrum albedo = upliftReflectance(rgbAlbedo, pathSegment.swl);
+        Spectrum specColor =
+            upliftReflectance(material.specularColor, pathSegment.swl);
 
 #if USE_MIS
         // --- Next-event estimation toward the environment light (MIS) ---
@@ -802,20 +960,21 @@ __global__ void shade(int iter, int depth, int num_paths,
             glm::vec3 Le = sampleEnvDirection(envMap, u01(rng), u01(rng),
                                               lightDir, lightPdf);
             if (lightPdf > 0.0f && glm::dot(lightDir, Ng) > 0.0f) {
-                glm::vec3 f;
+                Spectrum f;
                 float bsdfPdfL;
                 evalBSDF(woW, surfaceNormal, surfaceTangent, lightDir, material,
-                         texVals, f, bsdfPdfL);
+                         albedo, specColor, f, bsdfPdfL);
                 float cosAtSurface = glm::dot(lightDir, surfaceNormal);
-                if (bsdfPdfL > 0.0f && cosAtSurface > 0.0f &&
-                    (f.x > 0.0f || f.y > 0.0f || f.z > 0.0f)) {
+                if (bsdfPdfL > 0.0f && cosAtSurface > 0.0f && !isBlack(f)) {
                     Ray shadowRay;
                     shadowRay.origin = oldIntersect + Ng * 1e-3f;
                     shadowRay.direction = lightDir;
                     if (!anyHit(shadowRay, geoms, geoms_size, FLT_MAX)) {
                         float weight = powerHeuristic(lightPdf, bsdfPdfL);
+                        Spectrum LeS = upliftIlluminant(
+                            Le, pathSegment.swl, SPECTRUM_NONE, 0.0f, 0.0f);
                         pathSegment.radiance += pathSegment.color * f *
-                                                cosAtSurface * Le * weight /
+                                                cosAtSurface * LeS * weight /
                                                 lightPdf;
                     }
                 }
@@ -843,20 +1002,30 @@ __global__ void shade(int iter, int depth, int num_paths,
                 float cosAtSurface = glm::dot(lightDir, surfaceNormal);
                 if (pdfSA > 0.0f && cosAtSurface > 0.0f &&
                     glm::dot(lightDir, Ng) > 0.0f) {
-                    glm::vec3 f;
+                    Spectrum f;
                     float bsdfPdfL;
                     evalBSDF(woW, surfaceNormal, surfaceTangent, lightDir,
-                             material, texVals, f, bsdfPdfL);
-                    if (f.x > 0.0f || f.y > 0.0f || f.z > 0.0f) {
+                             material, albedo, specColor, f, bsdfPdfL);
+                    if (!isBlack(f)) {
+                        // Re-derive the ray from the OFFSET origin and stop
+                        // just short of the light with a RELATIVE epsilon.
+                        // Using the un-offset distance here is wrong: when the
+                        // normal points at the light, the origin offset brings
+                        // the light's own surface inside tMax and the light
+                        // "shadows" its own sample -- a dark cap on any
+                        // surface directly facing an area light.
                         Ray shadowRay;
                         shadowRay.origin = oldIntersect + Ng * 1e-3f;
-                        shadowRay.direction = lightDir;
-                        // Stop just short of the light so its own surface does
-                        // not count as an occluder.
+                        glm::vec3 sd = pL - shadowRay.origin;
+                        float sdist = glm::length(sd);
+                        shadowRay.direction = sd / sdist;
                         if (!anyHit(shadowRay, geoms, geoms_size,
-                                    dist - 1e-3f)) {
+                                    sdist * (1.0f - 1e-3f))) {
                             Material lMat = materials[L.material.materialId];
-                            glm::vec3 Le = lMat.color * lMat.emittance;
+                            Spectrum Le = upliftIlluminant(
+                                lMat.color * lMat.emittance, pathSegment.swl,
+                                lMat.spectrumType, lMat.blackbodyTemp,
+                                lMat.blackbodyNorm);
                             float weight = powerHeuristic(pdfSA, bsdfPdfL);
                             pathSegment.radiance += pathSegment.color * f *
                                                     cosAtSurface * Le * weight /
@@ -890,11 +1059,11 @@ __global__ void shade(int iter, int depth, int num_paths,
             if (cosAtSurface <= 0.0f || glm::dot(lightDir, Ng) <= 0.0f) {
                 continue;
             }
-            glm::vec3 f;
+            Spectrum f;
             float bsdfPdfL;
             evalBSDF(woW, surfaceNormal, surfaceTangent, lightDir, material,
-                     texVals, f, bsdfPdfL);
-            if (f.x <= 0.0f && f.y <= 0.0f && f.z <= 0.0f) {
+                     albedo, specColor, f, bsdfPdfL);
+            if (isBlack(f)) {
                 continue;
             }
             Ray shadowRay;
@@ -902,14 +1071,19 @@ __global__ void shade(int iter, int depth, int num_paths,
             shadowRay.direction = lightDir;
             float tMax = (dl.type == POINT_LIGHT) ? dist - 1e-3f : FLT_MAX;
             if (!anyHit(shadowRay, geoms, geoms_size, tMax)) {
+                Spectrum LiS = upliftIlluminant(Li, pathSegment.swl,
+                                                dl.spectrumType,
+                                                dl.blackbodyTemp,
+                                                dl.blackbodyNorm);
                 pathSegment.radiance +=
-                    pathSegment.color * f * cosAtSurface * Li;
+                    pathSegment.color * f * cosAtSurface * LiS;
             }
         }
 #endif // USE_MIS
 
         scatterRay(pathSegment, woW, surfaceNormal, surfaceTangent, wiW, pdf, c,
-                   eta, material, texVals, rng);
+                   eta, material, albedo, specColor, texVals, pathSegment.swl,
+                   rng);
 
         // Record MIS state for the ray we're about to spawn: the env seen
         // through it (on escape) will be weighted against this pdf, unless the
@@ -941,11 +1115,12 @@ __global__ void shade(int iter, int depth, int num_paths,
 #if (USE_RUSSIAN_ROULETTE) // Possibly terminate the path with Russian roulette
         if (depth > 3) {
             // So that the ray can bounce for a bit before we start terminating
-            // it
-            float maxComponent = fmaxf(c.x, fmaxf(c.y, c.z));
+            // it. In SPECTRAL builds this spans all carried wavelengths
+            // (terminated secondaries are zero, so the hero drives survival).
+            float maxThroughput = maxComponent(c);
             float survivalProbability = u01(rng);
             float eta_sq = eta * eta;
-            float q = fminf(maxComponent * eta_sq, 0.99f);
+            float q = fminf(maxThroughput * eta_sq, 0.99f);
 
             if (q < survivalProbability) {
                 pathSegment.remainingBounces = 0;
@@ -970,7 +1145,9 @@ __global__ void finalGather(int nPaths, glm::vec3 *image,
         // `radiance` is the path's accumulated light (emitter/env hits + NEE).
         // Add it unconditionally: with next-event estimation a path can carry
         // radiance even if it never terminated on a light itself.
-        glm::vec3 c = iterationPath.radiance;
+        // SPECTRAL builds convert the spectral estimate to RGB here (the only
+        // exit from spectrum-land); dev.image stays glm::vec3 either way.
+        glm::vec3 c = spectrumToRGB(iterationPath.radiance, iterationPath.swl);
         // Drop non-finite samples. A NaN/Inf from a degenerate BSDF or
         // frame (e.g. a divide-by-zero in a near-mirror microfacet lobe, or
         // normalize() of a zero half-vector) would otherwise be added once

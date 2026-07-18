@@ -1,0 +1,228 @@
+{
+  "_comment": "Dispersion correctness proof: two identical glass spheres under the same small white light. The LEFT one has a (deliberately exaggerated) Abbe number of 10, the RIGHT one has dispersion disabled. A correct implementation must produce an ordered, continuous rainbow caustic on the left (violet bent most, red least) and a plain white caustic on the right.",
+  "Materials": {
+    "light": {
+      "TYPE": "Emitting",
+      "RGB": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "EMITTANCE": 400.0
+    },
+    "floor_gray": {
+      "TYPE": "Diffuse",
+      "RGB": [
+        0.7,
+        0.7,
+        0.7
+      ]
+    },
+    "wall_dark": {
+      "TYPE": "Diffuse",
+      "RGB": [
+        0.15,
+        0.15,
+        0.15
+      ]
+    },
+    "glass_dispersive": {
+      "TYPE": "Dielectric",
+      "SPEC_RGB": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "IOR": 1.72,
+      "ABBE": 10.0
+    },
+    "glass_control": {
+      "TYPE": "Dielectric",
+      "SPEC_RGB": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "IOR": 1.72
+    }
+  },
+  "Camera": {
+    "RES": [
+      1600,
+      900
+    ],
+    "FOVY": 40.0,
+    "ITERATIONS": 3000,
+    "DEPTH": 12,
+    "FILE": "spectral_prism_proof",
+    "EYE": [
+      0.0,
+      5.2,
+      8.2
+    ],
+    "LOOKAT": [
+      0.0,
+      1.0,
+      -0.5
+    ],
+    "UP": [
+      0.0,
+      1.0,
+      0.0
+    ]
+  },
+  "Objects": [
+    {
+      "TYPE": "cube",
+      "MATERIAL": "light",
+      "TRANS": [
+        0.0,
+        9.6,
+        -5.2
+      ],
+      "ROTAT": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "SCALE": [
+        0.8,
+        0.2,
+        0.8
+      ]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "floor_gray",
+      "TRANS": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "ROTAT": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "SCALE": [
+        14.0,
+        0.01,
+        14.0
+      ]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "wall_dark",
+      "TRANS": [
+        0.0,
+        10.0,
+        0.0
+      ],
+      "ROTAT": [
+        0.0,
+        0.0,
+        90.0
+      ],
+      "SCALE": [
+        0.01,
+        14.0,
+        14.0
+      ]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "wall_dark",
+      "TRANS": [
+        0.0,
+        5.0,
+        -7.0
+      ],
+      "ROTAT": [
+        0.0,
+        90.0,
+        0.0
+      ],
+      "SCALE": [
+        0.01,
+        10.0,
+        14.0
+      ]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "wall_dark",
+      "TRANS": [
+        -7.0,
+        5.0,
+        0.0
+      ],
+      "ROTAT": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "SCALE": [
+        0.01,
+        10.0,
+        14.0
+      ]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "wall_dark",
+      "TRANS": [
+        7.0,
+        5.0,
+        0.0
+      ],
+      "ROTAT": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "SCALE": [
+        0.01,
+        10.0,
+        14.0
+      ]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "glass_dispersive",
+      "TRANS": [
+        -2.5,
+        2.4,
+        -1.0
+      ],
+      "ROTAT": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "SCALE": [
+        2.4,
+        2.4,
+        2.4
+      ]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "glass_control",
+      "TRANS": [
+        2.5,
+        2.4,
+        -1.0
+      ],
+      "ROTAT": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "SCALE": [
+        2.4,
+        2.4,
+        2.4
+      ]
+    }
+  ]
+}

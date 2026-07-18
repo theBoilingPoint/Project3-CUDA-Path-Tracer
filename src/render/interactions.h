@@ -47,10 +47,14 @@ __host__ __device__ void scatterRay(
     glm::vec3 tangent,
     glm::vec3 &wiW,
     float &pdf,
-    glm::vec3 &c,
+    Spectrum &c,
     float &eta,
     const Material& m,
-    const TextureValues& texVals,
+    const Spectrum &albedo,      // resolved by the caller (texture override + uplift)
+    const Spectrum &specColor,   // resolved by the caller
+    const TextureValues& texVals, // normal/bump maps only
+    SampledWavelengths &swl,     // mutable: dispersive dielectrics terminate
+                                 // secondary wavelengths (no-op in RGB builds)
     thrust::default_random_engine& rng);
 
 // Evaluate the BSDF value f(woW, wiW) and its solid-angle sampling pdf for a
@@ -65,6 +69,7 @@ __host__ __device__ void evalBSDF(
     glm::vec3 tangent,
     glm::vec3 wiW,
     const Material& m,
-    const TextureValues& texVals,
-    glm::vec3 &f,
+    const Spectrum &albedo,      // resolved by the caller (texture override + uplift)
+    const Spectrum &specColor,   // resolved by the caller
+    Spectrum &f,
     float &pdf);

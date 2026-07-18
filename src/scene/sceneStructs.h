@@ -8,6 +8,9 @@
 #include <string>
 #include <vector>
 
+// Spectral-vs-RGB transport switch, Spectrum type and SampledWavelengths.
+#include "../render/spectral.h"
+
 #define BACKGROUND_COLOR (glm::vec3(0.0f))
 
 enum GeomType { SPHERE, CUBE, MESH };
@@ -155,6 +158,15 @@ struct Material {
     float roughness;
     float emittance;
     float indexOfRefraction;
+    // Dispersion (dielectrics, SPECTRAL builds): Abbe number V of the glass;
+    // 0 disables dispersion (wavelength-independent IOR, original behavior).
+    float abbe;
+    // Emission spectrum (emitters, SPECTRAL builds): see SpectrumType.
+    int spectrumType;
+    float blackbodyTemp; // kelvin, used when spectrumType == SPECTRUM_BLACKBODY
+    // Host-computed scale that normalizes the Planck SPD at blackbodyTemp to
+    // unit luminance (set at scene load; see blackbodyLuminanceNorm).
+    float blackbodyNorm;
 };
 
 /****** For Texture Loading ******/
@@ -210,6 +222,10 @@ struct DeltaLight {
     // POINT: radiant intensity (W/sr); illuminance falls off as 1/dist^2.
     // DIRECTIONAL: radiance (constant, no falloff).
     glm::vec3 radiance;
+    // Emission spectrum (SPECTRAL builds): see SpectrumType.
+    int spectrumType;
+    float blackbodyTemp;
+    float blackbodyNorm; // see Material::blackbodyNorm
 };
 /*****************************************************************************************************************************/
 
@@ -236,12 +252,15 @@ struct RenderState {
 
 struct PathSegment {
     Ray ray;
-    glm::vec3 color; // Path throughput (product of BSDF weights along the path)
+    Spectrum color; // Path throughput (product of BSDF weights along the path)
     // Accumulated radiance for this path. Emitter/env hits and NEE add into
     // this (throughput * incoming radiance * MIS weight); finalGather reads it.
     // Separated from throughput so next-event estimation can add direct-light
     // contributions mid-path without terminating.
-    glm::vec3 radiance;
+    Spectrum radiance;
+    // The wavelengths this path transports (SPECTRAL builds; empty tag struct
+    // in RGB builds). Sampled once per path in generateRayFromCamera.
+    SampledWavelengths swl;
     int pixelIndex;
     int remainingBounces;
     bool hasHitLight;

@@ -1,0 +1,281 @@
+{
+  "_comment": "Five copies of diamond.glb at different orientations under one small bright light, in a near-black room. Visual correctness check: every orientation should show consistent facet fire and dispersed caustics; artifacts (flipped normals, refraction errors) would show up as dark/garbage facets on specific orientations.",
+  "Materials": {
+    "light": {
+      "TYPE": "Emitting",
+      "RGB": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "EMITTANCE": 450.0
+    },
+    "floor_dark": {
+      "TYPE": "Diffuse",
+      "RGB": [
+        0.4,
+        0.4,
+        0.4
+      ]
+    },
+    "wall_black": {
+      "TYPE": "Diffuse",
+      "RGB": [
+        0.06,
+        0.06,
+        0.06
+      ]
+    },
+    "diamond": {
+      "TYPE": "Dielectric",
+      "SPEC_RGB": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "IOR": 2.417,
+      "ABBE": 55.3
+    }
+  },
+  "Camera": {
+    "RES": [
+      1600,
+      900
+    ],
+    "FOVY": 27.0,
+    "ITERATIONS": 3000,
+    "DEPTH": 16,
+    "FILE": "spectral_diamond_angles",
+    "EYE": [
+      0.0,
+      3.2,
+      10.8
+    ],
+    "LOOKAT": [
+      0.0,
+      2.6,
+      -1.0
+    ],
+    "UP": [
+      0.0,
+      1.0,
+      0.0
+    ]
+  },
+  "Objects": [
+    {
+      "TYPE": "cube",
+      "MATERIAL": "light",
+      "TRANS": [
+        0.0,
+        9.0,
+        2.8
+      ],
+      "ROTAT": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "SCALE": [
+        1.2,
+        0.2,
+        1.2
+      ]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "floor_dark",
+      "TRANS": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "ROTAT": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "SCALE": [
+        18.0,
+        0.01,
+        18.0
+      ]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "wall_black",
+      "TRANS": [
+        0.0,
+        10.0,
+        0.0
+      ],
+      "ROTAT": [
+        0.0,
+        0.0,
+        90.0
+      ],
+      "SCALE": [
+        0.01,
+        18.0,
+        18.0
+      ]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "wall_black",
+      "TRANS": [
+        0.0,
+        5.0,
+        -9.0
+      ],
+      "ROTAT": [
+        0.0,
+        90.0,
+        0.0
+      ],
+      "SCALE": [
+        0.01,
+        10.0,
+        18.0
+      ]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "wall_black",
+      "TRANS": [
+        -9.0,
+        5.0,
+        0.0
+      ],
+      "ROTAT": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "SCALE": [
+        0.01,
+        10.0,
+        18.0
+      ]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "wall_black",
+      "TRANS": [
+        9.0,
+        5.0,
+        0.0
+      ],
+      "ROTAT": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "SCALE": [
+        0.01,
+        10.0,
+        18.0
+      ]
+    },
+    {
+      "TYPE": "mesh",
+      "MATERIAL": "diamond",
+      "MESH_PATH": "../../meshes/glb/diamond.glb",
+      "TRANS": [
+        -6.6,
+        2.4,
+        -3.2
+      ],
+      "ROTAT": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "SCALE": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "TYPE": "mesh",
+      "MATERIAL": "diamond",
+      "MESH_PATH": "../../meshes/glb/diamond.glb",
+      "TRANS": [
+        -3.4,
+        2.4,
+        -1.2
+      ],
+      "ROTAT": [
+        180.0,
+        0.0,
+        0.0
+      ],
+      "SCALE": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "TYPE": "mesh",
+      "MATERIAL": "diamond",
+      "MESH_PATH": "../../meshes/glb/diamond.glb",
+      "TRANS": [
+        0.0,
+        2.4,
+        0.0
+      ],
+      "ROTAT": [
+        90.0,
+        0.0,
+        0.0
+      ],
+      "SCALE": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "TYPE": "mesh",
+      "MATERIAL": "diamond",
+      "MESH_PATH": "../../meshes/glb/diamond.glb",
+      "TRANS": [
+        3.4,
+        2.4,
+        -1.2
+      ],
+      "ROTAT": [
+        45.0,
+        30.0,
+        0.0
+      ],
+      "SCALE": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "TYPE": "mesh",
+      "MATERIAL": "diamond",
+      "MESH_PATH": "../../meshes/glb/diamond.glb",
+      "TRANS": [
+        6.6,
+        2.4,
+        -3.2
+      ],
+      "ROTAT": [
+        -60.0,
+        0.0,
+        45.0
+      ],
+      "SCALE": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    }
+  ]
+}

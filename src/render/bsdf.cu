@@ -122,28 +122,28 @@ __host__ __device__ float pdfMicrofacet(const float m_ks, const float roughness,
 /*****************************************************************************/
 
 /** Eval */
-__host__ __device__ glm::vec3 evalDiffuse(const glm::vec3 &albedo, const glm::vec3 &woL, const glm::vec3 &wiL) {
+__host__ __device__ Spectrum evalDiffuse(const Spectrum &albedo, const glm::vec3 &woL, const glm::vec3 &wiL) {
     if (cosTheta(woL) <= 0 || cosTheta(wiL) <= 0) {
-        return glm::vec3(0.0f);
+        return Spectrum(0.0f);
     }
 
     return albedo * M_1_PIf;
 }
 
-__host__ __device__ glm::vec3 evalMirror() {
-    return glm::vec3(0.0f);
+__host__ __device__ Spectrum evalMirror() {
+    return Spectrum(0.0f);
 }
 
-__host__ __device__ glm::vec3 evalDielectric() {
-    return glm::vec3(0.0f);
+__host__ __device__ Spectrum evalDielectric() {
+    return Spectrum(0.0f);
 }
 
-__host__ __device__ glm::vec3 evalMicrofacet(const glm::vec3 &woL, const glm::vec3 &wiL, const glm::vec3 &whL, const float roughness, const float m_extIOR, const float m_intIOR, const glm::vec3 &m_kd, const float m_ks, const glm::vec3 &specColour) {
+__host__ __device__ Spectrum evalMicrofacet(const glm::vec3 &woL, const glm::vec3 &wiL, const glm::vec3 &whL, const float roughness, const float m_extIOR, const float m_intIOR, const Spectrum &m_kd, const float m_ks, const Spectrum &specColour) {
     float cosThetaWiL = cosTheta(wiL);
     float cosThetaWoL = cosTheta(woL);
 
     if (cosThetaWoL <= 0 || cosThetaWiL <= 0) {
-        return glm::vec3(0.0f);
+        return Spectrum(0.0f);
     }
 
     float wh_dot_woL = glm::dot(whL, woL);
@@ -156,20 +156,20 @@ __host__ __device__ glm::vec3 evalMicrofacet(const glm::vec3 &woL, const glm::ve
     // lobe's energy weight and the sampling probability, so the pdf is
     // unaffected and MIS stays consistent; specColour only recolours the
     // reflected specular energy (identity when SPEC_RGB = [1,1,1]).
-    glm::vec3 specular = specColour * (m_ks * D * F * G /
-                         (4 * cosThetaWoL * cosThetaWiL * cosTheta(whL)));
+    Spectrum specular = specColour * (m_ks * D * F * G /
+                        (4 * cosThetaWoL * cosThetaWiL * cosTheta(whL)));
     return m_kd / M_PIf + specular;
 }
 
 /** Bounce Directions and Return Colours */
-__host__ __device__ glm::vec3 sampleDiffuse(const glm::vec3 &albedo, const glm::vec3 &normal, const glm::vec2 &sample2D, glm::vec3 &wiW, float &eta) {
+__host__ __device__ Spectrum sampleDiffuse(const Spectrum &albedo, const glm::vec3 &normal, const glm::vec2 &sample2D, glm::vec3 &wiW, float &eta) {
     wiW = glm::normalize(squareToCosineHemisphere(sample2D, normal));
     eta = 1.0f;
 
     return albedo;
 }
 
-__host__ __device__ glm::vec3 sampleMirror(const glm::vec3 &normal, const glm::mat3 &worldToLocal, const glm::vec3 &woW, glm::vec3 &wiW, const glm::vec3 &specColour, float &eta) {
+__host__ __device__ Spectrum sampleMirror(const glm::vec3 &normal, const glm::mat3 &worldToLocal, const glm::vec3 &woW, glm::vec3 &wiW, const Spectrum &specColour, float &eta) {
     // The shading normal is face-forwarded before scatterRay dispatches, so
     // cosTheta(woL) > 0 holds here; no invalid-hemisphere guard is needed.
 
@@ -181,7 +181,7 @@ __host__ __device__ glm::vec3 sampleMirror(const glm::vec3 &normal, const glm::m
     return specColour;
 }
 
-__host__ __device__ glm::vec3 sampleDielectric(const glm::vec3 normal, glm::mat3 &worldToLocal, const glm::mat3 &localToWorld, const glm::vec3 &woW, const float sample1D, const float m_extIOR, const float m_intIOR, const glm::vec3 specColour, glm::vec3 &wiW, float &eta) {
+__host__ __device__ Spectrum sampleDielectric(const glm::vec3 normal, glm::mat3 &worldToLocal, const glm::mat3 &localToWorld, const glm::vec3 &woW, const float sample1D, const float m_extIOR, const float m_intIOR, const Spectrum specColour, glm::vec3 &wiW, float &eta) {
     glm::vec3 woL = glm::normalize(worldToLocal * woW);
     glm::vec3 normalLocal = glm::vec3(0.0f, 0.0f, 1.0f);
     float cosThetaWoL = cosTheta(woL);
@@ -205,7 +205,7 @@ __host__ __device__ glm::vec3 sampleDielectric(const glm::vec3 normal, glm::mat3
     // separate test: fresnel() already returns F = 1 there (so sample1D <= F is
     // always true) and weightN collapses to 0.
     if (sample1D <= F) {
-        glm::vec3 c = sampleMirror(normal, worldToLocal, woW, wiW, specColour, eta);
+        Spectrum c = sampleMirror(normal, worldToLocal, woW, wiW, specColour, eta);
         eta = eta1; // Put this line after the sampleMirror function call becasue sampleMirror changes eta to 1.0f
         return c;
     }
@@ -217,7 +217,7 @@ __host__ __device__ glm::vec3 sampleDielectric(const glm::vec3 normal, glm::mat3
     }
 }
 
-__host__ __device__ glm::vec3 sampleMicrofacet(const glm::vec3 &normal, const glm::mat3 &worldToLocal, const glm::mat3 &localToWorld, const glm::vec3 &woW, const glm::vec3 &m_kd, const float m_ks, const glm::vec3 &specColour, const float roughness, const float m_extIOR, const float m_intIOR, const glm::vec2 sample2D, glm::vec3 &wiW, float &pdf, float &eta) {
+__host__ __device__ Spectrum sampleMicrofacet(const glm::vec3 &normal, const glm::mat3 &worldToLocal, const glm::mat3 &localToWorld, const glm::vec3 &woW, const Spectrum &m_kd, const float m_ks, const Spectrum &specColour, const float roughness, const float m_extIOR, const float m_intIOR, const glm::vec2 sample2D, glm::vec3 &wiW, float &pdf, float &eta) {
     glm::vec3 woL = glm::normalize(worldToLocal * woW);
     glm::vec3 wiL;
     glm::vec2 sample;
@@ -242,7 +242,7 @@ __host__ __device__ glm::vec3 sampleMicrofacet(const glm::vec3 &normal, const gl
     float cosTheta_wiL = cosTheta(wiL);
     if (cosTheta_wiL <= 0.0f || cosTheta(woL) <= 0.0f) {
         pdf = 0.0f;
-        return glm::vec3(0.0f);
+        return Spectrum(0.0f);
     }
 
     glm::vec3 whL = glm::normalize(wiL + woL);

@@ -72,6 +72,8 @@ set(headers
     src/render/intersections.h
     src/render/interactions.h
     src/render/bsdf.h
+    src/render/spectral.h
+    src/render/spectrumData.h
     src/render/warp.h
     src/display/preview.h
     src/display/glslUtility.hpp
@@ -90,6 +92,7 @@ set(sources
     src/render/interactions.cu
     src/render/warp.cu
     src/render/bsdf.cu
+    src/render/spectrumData.cu
     src/display/preview.cpp
     src/display/glslUtility.cpp
     src/display/image.cpp
@@ -134,6 +137,18 @@ set(tinygltf_sources
     libs/tinygltf/tiny_gltf.cc
 )
 
+# rgb2spec (Jakob & Hanika 2019, "A Low-Dimensional Function Space for
+# Efficient Spectral Upsampling", BSD 3-clause, vendored in libs/rgb2spec).
+# The C reference implementation is linked into the app for loading the
+# coefficient table and unit-checking the GPU port at startup.
+set(rgb2spec_headers
+    libs/rgb2spec/rgb2spec.h
+)
+
+set(rgb2spec_sources
+    libs/rgb2spec/rgb2spec.c
+)
+
 list(SORT headers)
 list(SORT sources)
 list(SORT imgui_headers)
@@ -151,6 +166,7 @@ source_group("tinyobj\\Headers" FILES ${tinyobj_headers})
 source_group("tinyobj\\Sources" FILES ${tinyobj_sources})
 source_group("tinygltf\\Headers" FILES ${tinygltf_headers})
 source_group("tinygltf\\Sources" FILES ${tinygltf_sources})
+source_group("rgb2spec" FILES ${rgb2spec_headers} ${rgb2spec_sources})
 
 #add_subdirectory(src/ImGui)
 add_subdirectory(stream_compaction)  # TODO: uncomment if using your stream compaction
@@ -170,7 +186,32 @@ if(USE_OIDN)
     add_subdirectory(libs/oidn)
 endif()
 
-add_executable(${CMAKE_PROJECT_NAME} ${sources} ${headers} ${imgui_sources} ${imgui_headers})
+# rgb2spec.c is plain C.
+enable_language(C)
+
+add_executable(${CMAKE_PROJECT_NAME} ${sources} ${headers} ${imgui_sources} ${imgui_headers}
+    ${rgb2spec_sources} ${rgb2spec_headers})
+
+# ----------------------------------------------------------------------------
+# rgb2spec sRGB coefficient table (~9.4 MB), generated once at build time by
+# the vendored optimizer (multithreaded, takes about a minute; cached by the
+# build system afterwards) and copied next to the executable, where
+# initSpectralTables() (src/render/spectrumData.cu) loads it.
+# ----------------------------------------------------------------------------
+add_executable(rgb2spec_opt libs/rgb2spec/rgb2spec_opt.cpp)
+set_target_properties(rgb2spec_opt PROPERTIES FOLDER "tools")
+
+set(RGB2SPEC_TABLE ${CMAKE_BINARY_DIR}/srgb.coeff)
+add_custom_command(OUTPUT ${RGB2SPEC_TABLE}
+    COMMAND rgb2spec_opt 64 ${RGB2SPEC_TABLE} sRGB
+    DEPENDS rgb2spec_opt
+    COMMENT "Generating rgb2spec sRGB coefficient table (one-time, ~1 min)")
+add_custom_target(rgb2spec_table DEPENDS ${RGB2SPEC_TABLE})
+add_dependencies(${CMAKE_PROJECT_NAME} rgb2spec_table)
+add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RGB2SPEC_TABLE}
+            $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>
+    COMMENT "Copying srgb.coeff next to the path tracer")
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 if(CMAKE_VERSION VERSION_LESS "3.23.0")
     set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CUDA_ARCHITECTURES OFF)

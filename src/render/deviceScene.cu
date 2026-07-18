@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 
 #include "cudaUtil.h"
+#include "spectrumData.h"
 
 // Uploads each mesh geom's triangles and flattened BVH nodes to the device,
 // concatenated into one big array each, and points the per-geom device pointers
@@ -267,6 +268,11 @@ void deviceSceneInit(DeviceScene &ds, Scene *scene) {
     cudaMalloc(&ds.intersections, pixelcount * sizeof(ShadeableIntersection));
     cudaMemset(ds.intersections, 0, pixelcount * sizeof(ShadeableIntersection));
 
+#if SPECTRAL
+    // CIE tables + rgb2spec coefficient table for the spectral pipeline.
+    initSpectralTables();
+#endif
+
     checkCUDAError("deviceSceneInit");
 }
 
@@ -310,6 +316,10 @@ void deviceSceneFree(DeviceScene &ds) {
     cudaFree((void *)ds.envMap.marginalCdf);
     ds.envMap.conditionalCdf = nullptr;
     ds.envMap.marginalCdf = nullptr;
+
+#if SPECTRAL
+    freeSpectralTables();
+#endif
 
     checkCUDAError("deviceSceneFree");
 }

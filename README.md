@@ -329,6 +329,82 @@ In contrast, traditional texture loading might still be preferred in scenarios w
 
 The choice between procedural texture generation and traditional texture loading should consider both the visual fidelity required and the performance implications, as demonstrated by the observed improvements in rendering times across varying levels of scene complexity.
 
+## Spectral Rendering (Hero-Wavelength Path Tracing)
+
+The renderer can transport light **spectrally** instead of as RGB triples: each path carries radiance at 4 sampled wavelengths, enabling effects RGB transport fundamentally cannot produce — real dispersion (rainbow caustics through glass), physically meaningful light spectra (blackbody, CIE illuminants), and more accurate color mixing.
+
+**Toggle:** `#define SPECTRAL 0|1` in `src/render/spectral.h` (it is a cross-file switch, so it lives in a shared header rather than `pathtrace.cu`'s toggle block). `SPECTRAL 0` reproduces the original RGB renderer **bit-identically**. Rebuild after flipping it — and use a clean rebuild (`cmake --build build --config Release --target cis565_path_tracer --clean-first`), since the VS CUDA integration does not reliably re-track header-only macro flips.
+
+### Technique stack (all open source, quality-first)
+
+| Technique | Source |
+|---|---|
+| Hero Wavelength Spectral Sampling, N=4 wavelengths/path | [Wilkie et al., EGSR 2014](https://cgg.mff.cuni.cz/publications/hero-wavelength-spectral-sampling/); as in [PBRT-v4](https://pbr-book.org/4ed/Radiometry,_Spectra,_and_Color/Representing_Spectral_Distributions) |
+| Visible-wavelength importance sampling (pdf ∝ sech²) | Radziszewski et al. 2009 / PBRT-v4 `SampleVisibleWavelengths` |
+| Sigmoid-polynomial spectral uplifting of all RGB assets | [Jakob & Hanika 2019](https://rgl.epfl.ch/publications/Jakob2019Spectral), vendored [rgb2spec](https://github.com/mitsuba-renderer/rgb2spec) (BSD) in `libs/rgb2spec`; the sRGB coefficient table is generated once at build time |
+| Illuminant uplift for unbounded emission RGB | PBRT-v4 `RGBIlluminantSpectrum` (scaled sigmoid × D65) |
+| Dispersion via 2-term Cauchy IOR from (n_d, Abbe number), hero-only termination at dispersive interfaces | PBRT-v4 dielectric |
+| Sensor: CIE 1931 CMFs → XYZ → linear sRGB per iteration | public-domain CIE data (5 nm tables shipped with rgb2spec, resampled to 1 nm) |
+
+RGB enters spectrum-land in exactly two device functions (`upliftReflectance`, `upliftIlluminant` in `pathtrace.cu`) and leaves it in one (`spectrumToRGB` in `finalGather`); in RGB builds all three are identity pass-throughs, so the shading code has no `#ifdef` forest. Direction sampling is driven by the hero wavelength alone, and every lobe except the dispersive dielectric is wavelength-independent, so the existing scalar MIS machinery stays exact (the dispersive dielectric is a delta lobe and terminates the secondary wavelengths, PBRT-style).
+
+### Dispersion
+
+Give a dielectric an Abbe number and its IOR becomes wavelength-dependent (`IOR` is then interpreted as n_d at the 587.6 nm d-line):
+
+```json
+"glass_sf11": {
+  "TYPE": "Dielectric",
+  "SPEC_RGB": [1.0, 1.0, 1.0],
+  "IOR": 1.7847,
+  "ABBE": 25.68
+}
+```
+
+Reference Abbe numbers: BK7 crown glass 64.17 (n_d 1.5168), SF11 flint 25.68 (n_d 1.7847), diamond 55.3 (n_d 2.417). Lower Abbe = stronger dispersion. Demo scene: `./scenes/jsons/spectral/spectral_dispersion.json`.
+
+|![](./img/spectral_dispersion.png)|
+|:--:|
+|**BK7 crown glass, SF11 flint glass and diamond spheres under a small white side light** (spectral build, 2500 spp). Dispersion strength follows the Abbe numbers: the BK7 sphere (left, V=64) stays neutral while SF11 (middle, V=26) and diamond (right, V=55 but much higher IOR) show chromatic sparkle and color-fringed caustics|
+
+|![](./img/spectral_diamond.png)|
+|:--:|
+|**Diamond (`diamond.glb`, n_d 2.417, V 55.3)** — spectral build, 2500 spp, trace depth 16. The colored facet "fire" and the dispersed caustics on the floor come entirely from the wavelength-dependent IOR; the material is plain clear glass with diamond's measured constants (`./scenes/jsons/spectral/spectral_diamond.json`)|
+
+|![](./img/spectral_prism_proof.png)|
+|:--:|
+|**Dispersion correctness proof** (`./scenes/jsons/spectral/spectral_prism_proof.json`, 3000 spp): two identical glass spheres (IOR 1.72) under the same small white light — the left one has Abbe V=10, the right one has dispersion disabled. The left caustic separates into an ordered spectrum while the right stays white; a single-code-path difference (`ABBE` present or not) produces exactly the physical prediction|
+
+|![](./img/spectral_diamond_angles.png)|
+|:--:|
+|**Five diamonds at different orientations** (`./scenes/jsons/spectral/spectral_diamond_angles.json`, 3000 spp): upright, upside-down, lying sideways, and two compound tilts, all with diamond's measured constants. Every orientation shows consistent facet fire and dispersed caustics — a visual regression test for the mesh/refraction/dispersion pipeline (orientation-specific black or garbage facets would indicate normal or refraction bugs)|
+
+### Emission spectra
+
+Emitters (and delta lights) accept an optional `SPECTRUM` field; the RGB stays as a tint on top of the (unit-luminance-normalized) illuminant, so `EMITTANCE` controls brightness consistently across illuminants:
+
+```json
+"bulb":      { "TYPE": "Emitting", "RGB": [1,1,1], "EMITTANCE": 8.0, "SPECTRUM": {"BLACKBODY": 1900} },
+"sky_panel": { "TYPE": "Emitting", "RGB": [1,1,1], "EMITTANCE": 8.0, "SPECTRUM": "D65" }
+```
+
+Supported: `"D65"` (daylight), `"A"` (incandescent, 2856 K), `"E"` (equal energy), `{"BLACKBODY": <kelvin>}` (analytic Planck radiator). In RGB builds the illuminant is folded into the light's RGB tint at scene load, so scenes stay compatible. Demo scene: `./scenes/jsons/spectral/spectral_illuminants.json` (D65 vs. A vs. 1900 K candlelight panels).
+
+|![](./img/spectral_illuminants.png)|
+|:--:|
+|**The same white room lit by three light panels: CIE D65 (daylight), CIE A (incandescent) and a 1900 K blackbody (candlelight)** — all with `RGB [1,1,1]` and identical `EMITTANCE`; only the spectrum differs|
+
+### Validation
+
+- `SPECTRAL 0` renders are **bit-identical** to the pre-spectral renderer (SHA-256 compared).
+- The GPU port of the rgb2spec fetch/eval is checked at startup against the vendored reference C implementation (max |err| 3.5e-6 over 500 random samples), and a device-side probe verifies the CIE constant tables after upload.
+- White-furnace test (gray box, flat spectra): spectral vs. RGB mean abs difference 0.16/255.
+- Colored cornell box: 0.93/255 (in-gamut sRGB albedos round-trip through the uplift near-exactly; saturated multi-bounce color bleeding differs slightly — expected, and physically more correct).
+- Degenerate-Abbe test (`ABBE: 1e6` vs. no `ABBE`): matches within Monte Carlo noise, confirming the hero-only termination bookkeeping is unbiased.
+- Blackbody at 6504 K matches D65 closely; 2700 K and Illuminant A render visibly warm (R > G > B channel means), and the RGB-build fallback tint agrees with the spectral render.
+
+Costs: the path state grows by 32 bytes (wavelengths + pdfs), throughput/radiance become 4-wide, and each shaded hit performs up to three trilinear fetches from the 9.4 MB coefficient table — quality was deliberately prioritized over speed. Spectral noise from wavelength sampling averages out across iterations like any other Monte Carlo dimension.
+
 ## Mesh Loading
 This project supports .obj/.gltf/.glb file loading. I read the data from the files using tinyobjloader and tinygltf. 
 

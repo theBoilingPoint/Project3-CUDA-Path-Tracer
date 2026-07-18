@@ -3,6 +3,7 @@
 #include <glm/glm.hpp>
 #include <thrust/swap.h>
 
+#include "spectral.h"
 #include "warp.h"
 
 /** Helper Functions */
@@ -26,15 +27,18 @@ __host__ __device__ float pdfMicrofacet(const float m_ks, const float roughness,
 /*****************************************************************************/
 
 /** Eval */
-__host__ __device__ glm::vec3 evalDiffuse(const glm::vec3 &albedo, const glm::vec3 &woL, const glm::vec3 &wiL);
-__host__ __device__ glm::vec3 evalMirror();
-__host__ __device__ glm::vec3 evalDielectric();
-__host__ __device__ glm::vec3 evalMicrofacet(const glm::vec3 &woL, const glm::vec3 &wiL, const glm::vec3 &whL, const float roughness, const float m_extIOR, const float m_intIOR, const glm::vec3 &m_kd, const float m_ks, const glm::vec3 &specColour);
+// Color-carrying quantities (albedo, specColour, m_kd and the returned f) are
+// Spectrum: RGB in RGB builds, per-wavelength values in SPECTRAL builds.
+// Directions, pdfs and Fresnel stay scalar/vec3 in both modes.
+__host__ __device__ Spectrum evalDiffuse(const Spectrum &albedo, const glm::vec3 &woL, const glm::vec3 &wiL);
+__host__ __device__ Spectrum evalMirror();
+__host__ __device__ Spectrum evalDielectric();
+__host__ __device__ Spectrum evalMicrofacet(const glm::vec3 &woL, const glm::vec3 &wiL, const glm::vec3 &whL, const float roughness, const float m_extIOR, const float m_intIOR, const Spectrum &m_kd, const float m_ks, const Spectrum &specColour);
 /*****************************************************************************/
 
 /** Bounce Directions and Return Colours */
-__host__ __device__ glm::vec3 sampleDiffuse(const glm::vec3 &albedo, const glm::vec3 &normal, const glm::vec2 &sample2D, glm::vec3 &wiW, float &eta);
-__host__ __device__ glm::vec3 sampleMirror(const glm::vec3 &normal, const glm::mat3 &worldToLocal, const glm::vec3 &woW, glm::vec3 &wiW, const glm::vec3 &specColour, float &eta);
-__host__ __device__ glm::vec3 sampleDielectric(const glm::vec3 normal, glm::mat3 &worldToLocal, const glm::mat3 &localToWorld, const glm::vec3 &woW, const float sample1D, const float m_extIOR, const float m_intIOR, const glm::vec3 specColour, glm::vec3 &wiW, float &eta);
-__host__ __device__ glm::vec3 sampleMicrofacet(const glm::vec3 &normal, const glm::mat3 &worldToLocal, const glm::mat3 &localToWorld, const glm::vec3 &woW, const glm::vec3 &m_kd, const float m_ks, const glm::vec3 &specColour, const float roughness, const float m_extIOR, const float m_intIOR, const glm::vec2 sample2D, glm::vec3 &wiW, float &pdf, float &eta);
+__host__ __device__ Spectrum sampleDiffuse(const Spectrum &albedo, const glm::vec3 &normal, const glm::vec2 &sample2D, glm::vec3 &wiW, float &eta);
+__host__ __device__ Spectrum sampleMirror(const glm::vec3 &normal, const glm::mat3 &worldToLocal, const glm::vec3 &woW, glm::vec3 &wiW, const Spectrum &specColour, float &eta);
+__host__ __device__ Spectrum sampleDielectric(const glm::vec3 normal, glm::mat3 &worldToLocal, const glm::mat3 &localToWorld, const glm::vec3 &woW, const float sample1D, const float m_extIOR, const float m_intIOR, const Spectrum specColour, glm::vec3 &wiW, float &eta);
+__host__ __device__ Spectrum sampleMicrofacet(const glm::vec3 &normal, const glm::mat3 &worldToLocal, const glm::mat3 &localToWorld, const glm::vec3 &woW, const Spectrum &m_kd, const float m_ks, const Spectrum &specColour, const float roughness, const float m_extIOR, const float m_intIOR, const glm::vec2 sample2D, glm::vec3 &wiW, float &pdf, float &eta);
 /*****************************************************************************/
