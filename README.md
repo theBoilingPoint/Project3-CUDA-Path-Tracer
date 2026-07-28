@@ -405,6 +405,76 @@ Supported: `"D65"` (daylight), `"A"` (incandescent, 2856 K), `"E"` (equal energy
 
 Costs: the path state grows by 32 bytes (wavelengths + pdfs), throughput/radiance become 4-wide, and each shaded hit performs up to three trilinear fetches from the 9.4 MB coefficient table — quality was deliberately prioritized over speed. Spectral noise from wavelength sampling averages out across iterations like any other Monte Carlo dimension.
 
+## Volumetric Rendering (Participating Media)
+
+The renderer supports **participating media** — smoke, clouds, and colored fog — as first-class citizens of the path integral, following the null-scattering formulation used by [PBRT-v4's `VolPathIntegrator`](https://pbr-book.org/4ed/Light_Transport_II_Volume_Rendering/Volume_Scattering_Integrators) ([Miller, Georgiev & Jarosz 2019](https://cs.dartmouth.edu/~wjarosz/publications/miller19null.html)). Any cube or sphere geom can be turned into a volume by giving it a `Medium` material; its surface becomes an **invisible null boundary** and its interior scatters and absorbs light.
+
+|![](./img/volumetric_cloud_sky.png)|
+|:--:|
+|**Cumulus cloud** (`./scenes/jsons/volumetric/cloud_sky.json`, spectral build, 1280×720, 1500 spp, depth 32): a procedural cumulus (`PROFILE: "Cloud"` — distinct hash-placed lobes and towers over a flat condensation base, carved throughout by domain-warped inverted-Worley billows) inside a sky dome, side-lit by a small ultra-bright sun sphere. The white comes entirely from high-order multiple scattering (albedo ≈ 0.997, up to 32 bounces of delta-tracked transport); no surface, no shortcuts|
+
+|![](./img/volumetric_smoke.png)|
+|:--:|
+|**Rising smoke plume** (`./scenes/jsons/volumetric/cornell_smoke.json`, spectral build, 1280×720, 1500 spp, depth 16): a green scattering plume (`PROFILE: "Plume"` — a stack of swelling puff balls along a wandering, spiraling rise path, eroded by Worley billows that strengthen with height into a mushrooming head) rising off a diffuse sphere. The green is spectral: `SIGMA_S` scatters green while `SIGMA_A` absorbs red/blue, so both the in-scattered glow and the transmitted shadow are wavelength-correct|
+
+|![](./img/volumetric_fog_cloud.png)|
+|:--:|
+|**Cloud + colored fog** (`./scenes/jsons/volumetric/cornell_fog_cloud.json`, spectral build, 1280×720, 1200 spp, depth 16): a forward-scattering cloud-profile volume under the light, and a **homogeneous amber fog sphere** whose color comes purely from wavelength-dependent absorption (`SIGMA_A` absorbs blue strongly) — the spectral transmittance `exp(-σ_t(λ)·d)` deepens toward the core, exactly like real colored liquids|
+
+### Scene description
+
+```json
+"green_smoke":
+{
+    "TYPE":"Medium",
+    "SIGMA_A":[1.6, 0.05, 1.5],
+    "SIGMA_S":[0.25, 1.8, 0.3],
+    "G":0.15,
+    "DENSITY":6.5,
+    "HETEROGENEOUS":true,
+    "PROFILE":"Plume",
+    "NOISE_SCALE":4.5,
+    "NOISE_OCTAVES":5
+}
+```
+
+- `SIGMA_A` / `SIGMA_S` — absorption and scattering cross-sections per unit distance (RGB; uplifted to spectra in spectral builds).
+- `G` — [Henyey-Greenstein](https://www.astro.umd.edu/~jph/HG_note.pdf) phase-function asymmetry in (-1, 1): 0 is isotropic, positive scatters forward (clouds are strongly forward-scattering).
+- `DENSITY` — global multiplier on both sigmas.
+- `HETEROGENEOUS` — `true` evaluates a procedural density field in the geom's local space; `false` is a uniform medium.
+- `PROFILE` — the density field's large-scale shape: `"Fbm"` (thresholded value-noise wisps), `"Cloud"` (cumulus: distinct hash-placed lobes and towers over a flat base, remapped through the whole interior by domain-warped **inverted-Worley** billows — the cellular noise is what makes cauliflower florets; smooth value noise cannot), or `"Plume"` (rising smoke column: a stack of swelling puff balls along a wandering, spiraling path — fluid plumes are stacked vortex rings, and a noised cone always reads as a funnel — eroded by Worley billows that strengthen with height). Real volumes are a large-scale *shape* decorated by noise; noise alone in a bounding box reads as a fuzzy blob, which is why the profiles exist. `NOISE_SCALE`/`NOISE_OCTAVES` control the decorating noise.
+
+Media must be **cube or sphere** geoms (the shadow-ray transmittance needs an analytic ray/interior interval), must not be nested or overlap each other, and cannot be emissive; the camera must start in vacuum. All of this is validated at scene load.
+
+### Method
+
+The implementation lives in `src/render/volume.h` (sampling routines) and `src/render/pathtrace.cu` (integration), and plugs into the same closure/MIS machinery as the surface BSDFs:
+
+**Medium tracking.** Each path carries the index of the medium it is currently inside (`PathSegment::mediumGeom`, −1 in vacuum). Hitting a `Medium` geom's surface is a *null interface*: the ray passes straight through unchanged, the inside/outside state toggles, and **no path bounce is consumed** — only real scattering events count.
+
+**Distance sampling.** Whenever a ray segment starts inside a medium, a free-flight distance is sampled against the segment to the next surface:
+- *Homogeneous media* use the analytic exponential distribution `p(t) = σ_t e^(−σ_t t)`, sampled with the **hero wavelength's** σ_t.
+- *Heterogeneous media* use **delta (Woodcock) tracking** against a constant majorant `σ_maj = max_λ σ_t(λ)`: tentative collisions are sampled from the majorant exponential, classified real with probability `σ_t(x)/σ_maj` (hero-driven), and null otherwise.
+
+If the sampled distance passes the surface, the path continues to the surface with its throughput multiplied by the transmittance weight; otherwise a **real scatter event** replaces the surface hit: throughput picks up the single-scattering albedo term `σ_s/σ_t`, next-event estimation runs *at the scatter point*, and a new direction is drawn from the phase function.
+
+**Spectral correctness.** Sigma spectra are uplifted with the same Jakob-Hanika scheme as emission (`upliftSigma`), and all tracking decisions are driven by the hero wavelength while the other three wavelengths ride along with **per-wavelength ratio weights** — at a null collision each lane is reweighted by `(σ_maj − σ_t(λ))/(σ_maj − σ_t(hero))`, and the sampling pdf is averaged over the carried wavelengths ([Wilkie et al. 2014](https://cgg.mff.cuni.cz/publications/hero-wavelength-spectral-sampling/) balance heuristic, PBRT-v4's rescaled path probabilities collapsed to the single-sample form). This is what makes the amber fog's colored transmittance unbiased rather than a tinted approximation.
+
+**Phase function as a closure.** The Henyey-Greenstein phase function is implemented as just another lobe of the BSDF closure interface (`makePhaseBSDF(g)` in `src/render/bxdf.h`) with flags `Diffuse|Reflection|Transmission` — it samples/evaluates over the full sphere and is never delta. Because of that, a medium scatter event flows through **exactly the same NEE + MIS code path** as a surface hit (`sampleDirectLighting`): the environment map, area lights, and point/directional lights are all importance-sampled from inside the volume, MIS-weighted against phase sampling with the power heuristic. HG is its own perfect importance sampler (value ≡ pdf), so phase-sampled bounces carry weight 1.
+
+**Transmittance on shadow rays.** Every NEE shadow ray is now transmittance-aware (`shadowTransmittance`): opaque geometry still blocks, but medium boundaries don't — instead the ray's overlap interval with each medium is computed analytically (slab test / quadratic in the geom's local space) and the transmittance along it is accumulated: analytically (`exp(−σ_t d)`) for homogeneous media, and with **ratio tracking** ([Novák et al. 2014](https://cs.dartmouth.edu/~wjarosz/publications/novak14residual.html)) for heterogeneous ones, with Russian roulette on nearly-opaque channels to bound the loop. This gives volumes correct soft, colored shadows and lets surfaces inside a volume receive properly attenuated direct light.
+
+**Unbiasedness.** Delta tracking and ratio tracking are unbiased estimators of the free-flight distribution and transmittance for *any* density field bounded by the majorant — no ray-marching step size, no banding. Every density profile is clamped to [0, 1] by construction (times `DENSITY`), so the majorant is exact.
+
+### Validation
+
+- A `Medium` geom with `SIGMA_A = SIGMA_S = 0` is invisible: renders match the medium-free scene.
+- Homogeneous vs. heterogeneous with a constant density field (noise disabled) agree — delta tracking reduces to the analytic case.
+- Scenes without media are unaffected: the plain Cornell box renders identically before and after the volumetric integration (the medium code is skipped entirely when `mediumGeom` is −1).
+- The amber fog sphere's transmitted color deepens with path length through the sphere (Beer-Lambert), and its shadow on the floor is correspondingly tinted.
+
+Costs: each path stores one extra `int`; scenes without media pay only a per-bounce branch. In media, cost scales with `σ_maj × path length` (expected number of tracking steps) plus one transmittance walk per shadow ray.
+
 ## Mesh Loading
 This project supports .obj/.gltf/.glb file loading. I read the data from the files using tinyobjloader and tinygltf. 
 
@@ -443,34 +513,31 @@ The data highlights that Russian Roulette is particularly effective in reducing 
 
 The consistent increase in performance improvement across triangle counts provides a compelling case for the adoption of Russian Roulette in rendering scenarios where path optimization can lead to significant reductions in computational overhead and faster rendering times, without compromising on visual fidelity. This technique is especially relevant in real-time rendering applications and complex animation scenes where rendering speed is crucial.
 
-
-
-### Buggy BVH
-I intended to implement BVH but somehow when a ray traverses to the leaf node of the tree, it does not detect any triangles inside it. Although it's way faster than the naive approach, it's not working properly. The result looks like this:
-|![](./img/extraCredit/bvh_shadeTriangles.png)|
-|:--:|
-|**BVH not Detecting Triangles in Leaves**|
-
-
-I tried to render a scene to see the leaf ndoes and here's what I got:
-|![](./img/extraCredit/bvh_shadeBbox.png)|
-|:--:|
-|**BVH Leaf Node Boxes**|
-
-It looks like the BVH is able to detect the boxes but there are no triangles within. I am not quite sure what I've done wrong. Please take at look at my `bvh.h` and `bvh.cpp` files, and the `meshIntersectionTestBVH` function in `pathtrace.cu` to see if it's worth any credits. Much more importantly, please let me know what I've done wrong if you have any ideas.
-
-Thank you very much!
-
 # Recources
 ## Libraries
 - [TinyObjLoader](https://github.com/tinyobjloader/tinyobjloader)
 - [TinyGLTF](https://github.com/syoyo/tinygltf)
 - [PBRT](https://pbr-book.org/)
+- [rgb2spec](https://github.com/mitsuba-renderer/rgb2spec) (spectral uplifting coefficient tables, BSD)
+
+## Papers & Implementations
+### Spectral Rendering
+- Wilkie et al., [*Hero Wavelength Spectral Sampling*](https://cgg.mff.cuni.cz/publications/hero-wavelength-spectral-sampling/), EGSR 2014
+- Jakob & Hanika, [*A Low-Dimensional Function Space for Efficient Spectral Upsampling*](https://rgl.epfl.ch/publications/Jakob2019Spectral), Eurographics 2019
+
+### Volumetric Rendering
+- Miller, Georgiev & Jarosz, [*A Null-Scattering Path Integral Formulation of Light Transport*](https://cs.dartmouth.edu/~wjarosz/publications/miller19null.html), SIGGRAPH 2019 — the framework this implementation follows
+- [PBRT-v4, Chapter 14: Light Transport II — Volume Rendering](https://pbr-book.org/4ed/Light_Transport_II_Volume_Rendering/Volume_Scattering_Integrators) and the open-source [pbrt-v4 `VolPathIntegrator`](https://github.com/mmp/pbrt-v4) — the reference implementation consulted for delta tracking, spectral ratio weights, and phase-function MIS
+- Novák, Selle & Jarosz, [*Residual Ratio Tracking for Estimating Attenuation in Participating Media*](https://cs.dartmouth.edu/~wjarosz/publications/novak14residual.html), SIGGRAPH Asia 2014 — shadow-ray transmittance
+- Woodcock et al., *Techniques Used in the GEM Code* (1965) — the original delta-tracking algorithm
+- Henyey & Greenstein, [*Diffuse Radiation in the Galaxy*](https://www.astro.umd.edu/~jph/HG_note.pdf) (1941) — the phase function
+- Kettunen, d'Eon, Pantaleoni & Novák, [*An Unbiased Ray-Marching Transmittance Estimator*](https://developer.nvidia.com/blog/nvidia-research-an-unbiased-ray-marching-transmittance-estimator/), SIGGRAPH 2021 — a lower-variance transmittance alternative worth adopting if dense media become a bottleneck
+- [NanoVDB](https://developer.nvidia.com/blog/accelerating-openvdb-on-gpus-with-nanovdb/) — GPU-friendly sparse voxel grids; the natural next step for loading real cloud/smoke assets into `mediumDensity`
 
 ## Art
 ### Models
 - [Meshes Used in the Cover Image](https://poly.pizza/bundle/Bubbly-Bathroom-Set-eSvpFVB4Ft)
-- 
+
 ### Environment Maps
 - [Christmas Photo Studio 01](https://polyhaven.com/a/christmas_photo_studio_01)
 

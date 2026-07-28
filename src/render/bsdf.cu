@@ -170,7 +170,7 @@ __host__ __device__ Spectrum sampleDiffuse(const Spectrum &albedo, const glm::ve
 }
 
 __host__ __device__ Spectrum sampleMirror(const glm::vec3 &normal, const glm::mat3 &worldToLocal, const glm::vec3 &woW, glm::vec3 &wiW, const Spectrum &specColour, float &eta) {
-    // The shading normal is face-forwarded before scatterRay dispatches, so
+    // The shading normal is face-forwarded before the BSDF dispatches, so
     // cosTheta(woL) > 0 holds here; no invalid-hemisphere guard is needed.
 
     // Note that glm::reflect equation is woW - 2 * glm::dot(woW, normal) * normal

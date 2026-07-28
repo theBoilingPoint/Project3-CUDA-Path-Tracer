@@ -6,15 +6,16 @@
 #include <thrust/execution_policy.h>
 #include <thrust/random.h>
 
+#include "bxdf.h"
 #include "cudaUtil.h"
 #include "deviceScene.h"
 #include "glm/glm.hpp"
-#include "interactions.h"
 #include "intersections.h"
 #include "scene.h"
 #include "sceneStructs.h"
 #include "spectrumData.h"
 #include "utilities.h"
+#include "volume.h"
 
 #include <thrust/device_ptr.h>
 #include <thrust/sort.h>
@@ -219,6 +220,8 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth,
     segment.bsdfPdf = 0.0f;
     segment.specularBounce = true;
     segment.eta = 1.0f;
+    // Camera starts in vacuum (a camera inside a medium is unsupported).
+    segment.mediumGeom = -1;
 }
 
 // computeIntersections handles generating ray intersections ONLY.
@@ -344,7 +347,7 @@ __device__ glm::vec4 sampleBump(Texture texture, glm::vec2 uv) {
     float du = (h.z - h.w) * bumpStrength; // +u neighbor minus base
     float dv = (h.x - h.w) * bumpStrength; // +v neighbor minus base
 
-    // Stored as (du, dv) for the normal perturbation in scatterRay.
+    // Stored as (du, dv) for the normal perturbation in makeBSDF.
     return glm::vec4(du, dv, 0.0f, 0.0f);
 }
 
@@ -474,14 +477,19 @@ __device__ float powerHeuristic(float a, float b) {
 
 // Occlusion test for a shadow ray. Returns true if any scene geometry is hit at
 // a distance in (epsilon, tMax). For the environment light (at infinity) tMax
-// is effectively unbounded, so any hit blocks it.
+// is effectively unbounded, so any hit blocks it. Medium-boundary geoms are
+// null interfaces, not occluders -- they are skipped here and their
+// attenuation is applied by shadowTransmittance instead.
 __device__ bool anyHit(const Ray &ray, Geom *geoms, int geoms_size,
-                       float tMax) {
+                       Material *materials, float tMax) {
     glm::vec3 tmpP, tmpN, tmpGN, tmpT;
     glm::vec2 tmpUV;
     bool outside;
     for (int i = 0; i < geoms_size; ++i) {
         Geom &geom = geoms[i];
+        if (materials[geom.material.materialId].type == MatType::MEDIUM) {
+            continue;
+        }
         float t = -1.0f;
         if (geom.type == CUBE) {
             t = boxIntersectionTest(geom, ray, tmpP, tmpN, outside);
@@ -668,7 +676,8 @@ __device__ glm::vec3 checkerboard(float u, float v, int checkerSize) {
 
 // Nearest 1nm CIE table bin for a wavelength in [LAMBDA_MIN, LAMBDA_MAX].
 __device__ inline int cieBin(float lambda) {
-    int bin = (int)(lambda + 0.5f) - (int)LAMBDA_MIN; // lambda > 0: trunc == round
+    int bin =
+        (int)(lambda + 0.5f) - (int)LAMBDA_MIN; // lambda > 0: trunc == round
     return min(max(bin, 0), N_CIE_BINS - 1);
 }
 
@@ -697,17 +706,17 @@ __device__ Spectrum upliftReflectance(const glm::vec3 &rgb,
 __device__ inline float illuminantSPD(int spectrumType, float blackbodyTemp,
                                       float blackbodyNorm, float lambda) {
     switch (spectrumType) {
-        case SPECTRUM_A:
-            return c_spectral.illumA[cieBin(lambda)];
-        case SPECTRUM_E:
-            // Equal energy, luminance-normalized: 1/(CIE_Y_INTEGRAL/N) per nm.
-            return (float)N_CIE_BINS / CIE_Y_INTEGRAL;
-        case SPECTRUM_BLACKBODY:
-            return planckSPD(lambda, blackbodyTemp) * blackbodyNorm;
-        case SPECTRUM_NONE:
-        case SPECTRUM_D65:
-        default:
-            return c_spectral.d65[cieBin(lambda)];
+    case SPECTRUM_A:
+        return c_spectral.illumA[cieBin(lambda)];
+    case SPECTRUM_E:
+        // Equal energy, luminance-normalized: 1/(CIE_Y_INTEGRAL/N) per nm.
+        return (float)N_CIE_BINS / CIE_Y_INTEGRAL;
+    case SPECTRUM_BLACKBODY:
+        return planckSPD(lambda, blackbodyTemp) * blackbodyNorm;
+    case SPECTRUM_NONE:
+    case SPECTRUM_D65:
+    default:
+        return c_spectral.d65[cieBin(lambda)];
     }
 }
 
@@ -738,6 +747,29 @@ __device__ Spectrum upliftIlluminant(const glm::vec3 &rgb,
     return s;
 }
 
+// Medium extinction/scattering coefficients (unbounded, like emission) RGB ->
+// spectrum at the path wavelengths. Same normalize-uplift-rescale scheme as
+// upliftIlluminant, minus the illuminant SPD: sigma spectra are smooth
+// reflectance-like curves scaled back to the RGB magnitude, and the scheme is
+// exactly homogeneous in scale so densityScale passes through unchanged.
+__device__ Spectrum upliftSigma(const glm::vec3 &rgb,
+                                const SampledWavelengths &swl) {
+    float m = fmaxf(rgb.x, fmaxf(rgb.y, rgb.z));
+    if (m <= 0.0f) {
+        return Spectrum(0.0f);
+    }
+    float scale = 2.0f * m;
+    float coeff[3];
+    rs_fetchCoeffs(c_spectral.rgb2specData, c_spectral.rgb2specScale,
+                   c_spectral.rgb2specRes, rgb / scale, coeff);
+    Spectrum s;
+#pragma unroll
+    for (int i = 0; i < NSpectrumSamples; ++i) {
+        s[i] = rs_evalSigmoid(coeff, swl.lambda[i]) * scale;
+    }
+    return s;
+}
+
 // Sensor: Monte Carlo estimate of the path's radiance spectrum -> CIE XYZ
 // (via the 1931 color matching functions and the wavelength sampling pdfs)
 // -> linear sRGB. Terminated secondary wavelengths contribute 0 (their pdf is
@@ -762,10 +794,9 @@ __device__ glm::vec3 spectrumToRGB(const Spectrum &L,
     // details/cie1931.h, which generated the coefficient table). Out-of-gamut
     // spectra (e.g. dispersed highlights) can go negative; the accumulation
     // buffer is signed float and display/save clamp at the end.
-    return glm::vec3(
-        3.240479f * xyz.x - 1.537150f * xyz.y - 0.498535f * xyz.z,
-        -0.969256f * xyz.x + 1.875991f * xyz.y + 0.041556f * xyz.z,
-        0.055648f * xyz.x - 0.204043f * xyz.y + 1.057311f * xyz.z);
+    return glm::vec3(3.240479f * xyz.x - 1.537150f * xyz.y - 0.498535f * xyz.z,
+                     -0.969256f * xyz.x + 1.875991f * xyz.y + 0.041556f * xyz.z,
+                     0.055648f * xyz.x - 0.204043f * xyz.y + 1.057311f * xyz.z);
 }
 
 #else // !SPECTRAL: identity pass-throughs
@@ -781,12 +812,205 @@ __device__ Spectrum upliftIlluminant(const glm::vec3 &rgb,
     return rgb;
 }
 
+__device__ Spectrum upliftSigma(const glm::vec3 &rgb,
+                                const SampledWavelengths &) {
+    return rgb;
+}
+
 __device__ glm::vec3 spectrumToRGB(const Spectrum &L,
                                    const SampledWavelengths &) {
     return L;
 }
 
 #endif // SPECTRAL
+
+// Visibility of a shadow ray through participating media: 0 if an opaque
+// occluder blocks the segment (media boundaries don't count), otherwise the
+// product of the transmittances of every medium the segment crosses
+// (analytic for homogeneous, ratio tracking for heterogeneous -- see
+// volume.h).
+__device__ Spectrum shadowTransmittance(const Ray &ray, float tMax,
+                                        Geom *geoms, int geoms_size,
+                                        Material *materials,
+                                        const SampledWavelengths &swl,
+                                        thrust::default_random_engine &rng) {
+    if (anyHit(ray, geoms, geoms_size, materials, tMax)) {
+        return Spectrum(0.0f);
+    }
+    Spectrum Tr(1.0f);
+    for (int i = 0; i < geoms_size; ++i) {
+        const Geom &g = geoms[i];
+        const Material m = materials[g.material.materialId];
+        if (m.type != MatType::MEDIUM) {
+            continue;
+        }
+        float t0, t1;
+        if (!mediumInterval(g, ray, t0, t1)) {
+            continue;
+        }
+        t0 = fmaxf(t0, 0.0f);
+        t1 = fminf(t1, tMax);
+        if (t1 <= t0) {
+            continue;
+        }
+        Spectrum sigT =
+            (upliftSigma(m.sigmaA, swl) + upliftSigma(m.sigmaS, swl)) *
+            m.densityScale;
+        Tr *= mediumTransmittance(g, m, sigT, ray, t0, t1, rng);
+        if (isBlack(Tr)) {
+            return Spectrum(0.0f);
+        }
+    }
+    return Tr;
+}
+
+#if USE_MIS
+// Next-event estimation toward every light type (environment, area, delta),
+// shared by surface hits and medium scatter events: a medium event passes the
+// phase-function closure (makePhaseBSDF) and isSurface = false, which drops
+// the surface-only parts (geometric-normal gates, the cosine factor, and the
+// normal-offset shadow origin). Delta-only closures must not call this (their
+// f cannot be evaluated for a given direction).
+__device__ void sampleDirectLighting(
+    PathSegment &pathSegment, const BSDF &bsdf, const glm::vec3 &p,
+    bool isSurface, const glm::vec3 &woW, const glm::vec3 &Ng,
+    const EnvironmentMap &envMap, Geom *geoms, int geoms_size,
+    Material *materials, Geom *lights, int numLights, DeltaLight *deltaLights,
+    int numDeltaLights, thrust::default_random_engine &rng) {
+    thrust::uniform_real_distribution<float> u01(0, 1);
+    glm::vec3 shadowOrigin = isSurface ? p + Ng * 1e-3f : p;
+
+    // --- Environment light ---
+    // Sample a direction from the env's luminance distribution, evaluate the
+    // closure for it, and add its (transmittance-weighted) contribution
+    // MIS-weighted against closure sampling.
+    if (envMap.valid && envMap.distValid) {
+        glm::vec3 lightDir;
+        float lightPdf;
+        glm::vec3 Le =
+            sampleEnvDirection(envMap, u01(rng), u01(rng), lightDir, lightPdf);
+        if (lightPdf > 0.0f &&
+            (!isSurface || glm::dot(lightDir, Ng) > 0.0f)) {
+            float bsdfPdfL;
+            Spectrum f = bsdf.eval(woW, lightDir, bsdfPdfL);
+            float cosFactor = isSurface ? glm::dot(lightDir, bsdf.ns) : 1.0f;
+            if (bsdfPdfL > 0.0f && cosFactor > 0.0f && !isBlack(f)) {
+                Ray shadowRay;
+                shadowRay.origin = shadowOrigin;
+                shadowRay.direction = lightDir;
+                Spectrum Tr =
+                    shadowTransmittance(shadowRay, FLT_MAX, geoms, geoms_size,
+                                        materials, pathSegment.swl, rng);
+                if (!isBlack(Tr)) {
+                    float weight = powerHeuristic(lightPdf, bsdfPdfL);
+                    Spectrum LeS = upliftIlluminant(
+                        Le, pathSegment.swl, SPECTRUM_NONE, 0.0f, 0.0f);
+                    pathSegment.radiance += pathSegment.color * f * cosFactor *
+                                            Tr * LeS * weight / lightPdf;
+                }
+            }
+        }
+    }
+
+    // --- Area lights ---
+    // Pick one emitter uniformly, sample a point on it, and add its
+    // shadow-tested contribution weighted against closure sampling. Dividing
+    // by the 1/numLights selection probability makes this an unbiased
+    // estimate of all the area lights' direct contribution.
+    if (numLights > 0) {
+        int li = min((int)(u01(rng) * numLights), numLights - 1);
+        Geom L = lights[li];
+        glm::vec3 pL, nL;
+        float pdfArea;
+        sampleLightGeom(L, u01(rng), u01(rng), u01(rng), pL, nL, pdfArea);
+        if (pdfArea > 0.0f) {
+            glm::vec3 d = pL - p;
+            float dist = sqrtf(glm::dot(d, d));
+            glm::vec3 lightDir = d / dist;
+            float pdfSA =
+                lightPdfSolidAngle(pdfArea, p, pL, nL) / (float)numLights;
+            float cosFactor = isSurface ? glm::dot(lightDir, bsdf.ns) : 1.0f;
+            if (pdfSA > 0.0f && cosFactor > 0.0f &&
+                (!isSurface || glm::dot(lightDir, Ng) > 0.0f)) {
+                float bsdfPdfL;
+                Spectrum f = bsdf.eval(woW, lightDir, bsdfPdfL);
+                if (!isBlack(f)) {
+                    // Re-derive the ray from the OFFSET origin and stop just
+                    // short of the light with a RELATIVE epsilon. Using the
+                    // un-offset distance here is wrong: when the normal points
+                    // at the light, the origin offset brings the light's own
+                    // surface inside tMax and the light "shadows" its own
+                    // sample -- a dark cap on any surface directly facing an
+                    // area light.
+                    Ray shadowRay;
+                    shadowRay.origin = shadowOrigin;
+                    glm::vec3 sd = pL - shadowRay.origin;
+                    float sdist = glm::length(sd);
+                    shadowRay.direction = sd / sdist;
+                    Spectrum Tr = shadowTransmittance(
+                        shadowRay, sdist * (1.0f - 1e-3f), geoms, geoms_size,
+                        materials, pathSegment.swl, rng);
+                    if (!isBlack(Tr)) {
+                        Material lMat = materials[L.material.materialId];
+                        Spectrum Le = upliftIlluminant(
+                            lMat.color * lMat.emittance, pathSegment.swl,
+                            lMat.spectrumType, lMat.blackbodyTemp,
+                            lMat.blackbodyNorm);
+                        float weight = powerHeuristic(pdfSA, bsdfPdfL);
+                        pathSegment.radiance += pathSegment.color * f *
+                                                cosFactor * Tr * Le * weight /
+                                                pdfSA;
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Delta (point/directional) lights ---
+    // Delta lights can't be hit by closure sampling, so each is a single
+    // shadow-ray sample with no MIS weight (weight = 1).
+    for (int li = 0; li < numDeltaLights; ++li) {
+        DeltaLight dl = deltaLights[li];
+        glm::vec3 lightDir;
+        float dist;
+        glm::vec3 Li;
+        if (dl.type == POINT_LIGHT) {
+            glm::vec3 d = dl.position - p;
+            float dist2 = glm::dot(d, d);
+            dist = sqrtf(dist2);
+            lightDir = d / dist;
+            Li = dl.radiance / dist2; // inverse-square falloff
+        } else {                      // DIRECTIONAL_LIGHT
+            lightDir = -glm::normalize(dl.direction);
+            dist = FLT_MAX;
+            Li = dl.radiance;
+        }
+        float cosFactor = isSurface ? glm::dot(lightDir, bsdf.ns) : 1.0f;
+        if (cosFactor <= 0.0f ||
+            (isSurface && glm::dot(lightDir, Ng) <= 0.0f)) {
+            continue;
+        }
+        float bsdfPdfL;
+        Spectrum f = bsdf.eval(woW, lightDir, bsdfPdfL);
+        if (isBlack(f)) {
+            continue;
+        }
+        Ray shadowRay;
+        shadowRay.origin = shadowOrigin;
+        shadowRay.direction = lightDir;
+        float tMax = (dl.type == POINT_LIGHT) ? dist - 1e-3f : FLT_MAX;
+        Spectrum Tr = shadowTransmittance(shadowRay, tMax, geoms, geoms_size,
+                                          materials, pathSegment.swl, rng);
+        if (!isBlack(Tr)) {
+            Spectrum LiS = upliftIlluminant(Li, pathSegment.swl,
+                                            dl.spectrumType, dl.blackbodyTemp,
+                                            dl.blackbodyNorm);
+            pathSegment.radiance +=
+                pathSegment.color * f * cosFactor * Tr * LiS;
+        }
+    }
+}
+#endif // USE_MIS
 
 __global__ void shade(int iter, int depth, int num_paths,
                       ShadeableIntersection *shadeableIntersections,
@@ -836,7 +1060,86 @@ __global__ void shade(int iter, int depth, int num_paths,
         return;
     }
 
+    thrust::default_random_engine rng = makeSeededRandomEngine(iter, idx, depth);
+    thrust::uniform_real_distribution<float> u01(0, 1);
+
+    // --- Participating medium: march the segment up to the hit point ---
+    // If the path is inside a medium, a scattering event may occur before the
+    // surface. Homogeneous media sample the free-flight distance analytically;
+    // heterogeneous media delta-track against the majorant (volume.h). On a
+    // scatter the surface hit is discarded: throughput picks up the
+    // sigma_s/pdf weight, NEE runs at the scatter point with the
+    // phase-function closure, and the new ray is phase-sampled. On
+    // pass-through the throughput picks up the transmittance weight and the
+    // surface is shaded as usual.
+    if (pathSegment.mediumGeom >= 0) {
+        const Geom &mg = geoms[pathSegment.mediumGeom];
+        const Material mm = materials[mg.material.materialId];
+        Spectrum sigA =
+            upliftSigma(mm.sigmaA, pathSegment.swl) * mm.densityScale;
+        Spectrum sigS =
+            upliftSigma(mm.sigmaS, pathSegment.swl) * mm.densityScale;
+        Spectrum sigT = sigA + sigS;
+
+        MediumSample msamp =
+            mm.heterogeneous
+                ? sampleMediumHeterogeneous(mg, mm, sigT, sigS,
+                                            pathSegment.ray, intersection.t,
+                                            rng)
+                : sampleMediumHomogeneous(sigT, sigS, intersection.t,
+                                          u01(rng));
+        pathSegment.color *= msamp.weight;
+        if (msamp.scattered) {
+            glm::vec3 scatterP =
+                pathSegment.ray.origin + msamp.t * pathSegment.ray.direction;
+            glm::vec3 woW = -pathSegment.ray.direction;
+            BSDF phase = makePhaseBSDF(mm.hgG);
+#if USE_MIS
+            sampleDirectLighting(pathSegment, phase, scatterP,
+                                 /*isSurface=*/false, woW, glm::vec3(0.0f),
+                                 envMap, geoms, geoms_size, materials, lights,
+                                 numLights, deltaLights, numDeltaLights, rng);
+#endif
+            glm::vec2 uPhase(u01(rng), u01(rng));
+            BSDFSample ps;
+            phase.sample(woW, uPhase, pathSegment.swl, ps);
+            pathSegment.ray.origin = scatterP;
+            pathSegment.ray.direction = ps.wiW;
+            pathSegment.bsdfPdf = ps.pdf;
+            pathSegment.specularBounce = false;
+            // mediumGeom unchanged: the path is still inside the medium.
+
+#if (USE_RUSSIAN_ROULETTE)
+            if (depth > 3) {
+                float q = fminf(maxComponent(msamp.weight), 0.99f);
+                if (q < u01(rng)) {
+                    pathSegment.remainingBounces = 0;
+                    return;
+                }
+                pathSegment.color /= q;
+            }
+#endif
+            pathSegment.remainingBounces--;
+            return;
+        }
+    }
+
     Material material = materials[intersection.materials.materialId];
+
+    // --- Medium boundary: a null interface, not a surface ---
+    // Crossing it only toggles the path's inside-a-medium state and continues
+    // the ray straight through, nudged past the boundary. Not a scattering
+    // event: the MIS state (bsdfPdf/specularBounce) still describes the last
+    // real bounce, and no path bounce is consumed.
+    if (material.type == MatType::MEDIUM) {
+        bool entering = pathSegment.mediumGeom != intersection.hitGeomIndex;
+        pathSegment.mediumGeom = entering ? intersection.hitGeomIndex : -1;
+        pathSegment.ray.origin =
+            getPointOnRay(pathSegment.ray, intersection.t) +
+            pathSegment.ray.direction * 2e-3f;
+        return;
+    }
+
     glm::vec2 uv = intersection.uv;
     TextureValues texVals;
 
@@ -886,10 +1189,10 @@ __global__ void shade(int iter, int depth, int num_paths,
         // same direction. Full weight when NEE couldn't have taken it: a
         // specular/ primary ray, an unsupported (area == 0) emitter, or no
         // lights.
-        Spectrum Le = upliftIlluminant(materialColor * material.emittance,
-                                       pathSegment.swl, material.spectrumType,
-                                       material.blackbodyTemp,
-                                       material.blackbodyNorm);
+        Spectrum Le =
+            upliftIlluminant(materialColor * material.emittance,
+                             pathSegment.swl, material.spectrumType,
+                             material.blackbodyTemp, material.blackbodyNorm);
         float weight = 1.0f;
 #if USE_MIS
         if (!pathSegment.specularBounce && numLights > 0 &&
@@ -910,18 +1213,10 @@ __global__ void shade(int iter, int depth, int num_paths,
         pathSegment.remainingBounces = 0;
         pathSegment.hasHitLight = true;
     } else {
-        thrust::default_random_engine rng =
-            makeSeededRandomEngine(iter, idx, depth);
-        thrust::uniform_real_distribution<float> u01(0, 1);
-
         glm::vec3 oldIntersect = getPointOnRay(pathSegment.ray, intersection.t);
         glm::vec3 surfaceNormal = glm::normalize(intersection.surfaceNormal);
         glm::vec3 surfaceTangent = intersection.surfaceTangent;
         glm::vec3 woW = -pathSegment.ray.direction;
-        glm::vec3 wiW;
-        Spectrum c;
-        float pdf;
-        float eta;
 
         // Geometric (face) normal, kept on the same side as the shading
         // normal (guards against inconsistent triangle winding).
@@ -930,13 +1225,9 @@ __global__ void shade(int iter, int depth, int num_paths,
             Ng = -Ng;
         }
 
-        bool isSpecular = (material.type == MatType::MIRROR ||
-                           material.type == MatType::DIELECTRIC);
-
         // Resolve the surface's reflectance inputs once for every BSDF call
         // below (the NEE evaluations and the scatter). An albedo texture
-        // overrides the material's base color; this resolution used to be
-        // duplicated inside scatterRay and evalBSDF. In SPECTRAL builds the
+        // overrides the material's base color. In SPECTRAL builds the
         // resolved RGB values are uplifted to spectra here -- the single point
         // where reflectance RGB enters spectrum-land.
         glm::vec3 rgbAlbedo = materialColor;
@@ -947,149 +1238,42 @@ __global__ void shade(int iter, int depth, int num_paths,
         Spectrum specColor =
             upliftReflectance(material.specularColor, pathSegment.swl);
 
+        // Build the BSDF closure for this hit: face-forwarding, TBN and
+        // normal/bump mapping happen once here; NEE evaluation and scattering
+        // below share the resulting frame, so MIS pdfs are consistent.
+        BSDF bsdf = makeBSDF(material, albedo, specColor, surfaceNormal,
+                             surfaceTangent, texVals, woW);
+        // Uniform, flags-derived gating (replaces the ad-hoc material-enum
+        // check): delta-only closures cannot be NEE'd and take full MIS
+        // weight when a BSDF ray finds a light through them.
+        bool isSpecular = isDeltaOnly(bsdf.flags());
+
 #if USE_MIS
-        // --- Next-event estimation toward the environment light (MIS) ---
-        // Sample a direction from the env's luminance distribution, evaluate
-        // the BSDF for it, and add its (visibility-tested) contribution
-        // weighted against BSDF sampling. Skipped for specular lobes (delta
-        // BSDF cannot be evaluated for an arbitrary direction; the BSDF-sampled
-        // escape already captures it at full weight).
-        if (envMap.valid && envMap.distValid && !isSpecular) {
-            glm::vec3 lightDir;
-            float lightPdf;
-            glm::vec3 Le = sampleEnvDirection(envMap, u01(rng), u01(rng),
-                                              lightDir, lightPdf);
-            if (lightPdf > 0.0f && glm::dot(lightDir, Ng) > 0.0f) {
-                Spectrum f;
-                float bsdfPdfL;
-                evalBSDF(woW, surfaceNormal, surfaceTangent, lightDir, material,
-                         albedo, specColor, f, bsdfPdfL);
-                float cosAtSurface = glm::dot(lightDir, surfaceNormal);
-                if (bsdfPdfL > 0.0f && cosAtSurface > 0.0f && !isBlack(f)) {
-                    Ray shadowRay;
-                    shadowRay.origin = oldIntersect + Ng * 1e-3f;
-                    shadowRay.direction = lightDir;
-                    if (!anyHit(shadowRay, geoms, geoms_size, FLT_MAX)) {
-                        float weight = powerHeuristic(lightPdf, bsdfPdfL);
-                        Spectrum LeS = upliftIlluminant(
-                            Le, pathSegment.swl, SPECTRUM_NONE, 0.0f, 0.0f);
-                        pathSegment.radiance += pathSegment.color * f *
-                                                cosAtSurface * LeS * weight /
-                                                lightPdf;
-                    }
-                }
-            }
-        }
-
-        // --- Next-event estimation toward an area light (MIS) ---
-        // Pick one emitter uniformly, sample a point on it, and add its
-        // shadow-tested contribution weighted against BSDF sampling. Dividing
-        // by the 1/numLights selection probability makes this an unbiased
-        // estimate of all the area lights' direct contribution.
-        if (numLights > 0 && !isSpecular) {
-            int li = min((int)(u01(rng) * numLights), numLights - 1);
-            Geom L = lights[li];
-            glm::vec3 pL, nL;
-            float pdfArea;
-            sampleLightGeom(L, u01(rng), u01(rng), u01(rng), pL, nL, pdfArea);
-            if (pdfArea > 0.0f) {
-                glm::vec3 d = pL - oldIntersect;
-                float dist = sqrtf(glm::dot(d, d));
-                glm::vec3 lightDir = d / dist;
-                float pdfSA =
-                    lightPdfSolidAngle(pdfArea, oldIntersect, pL, nL) /
-                    (float)numLights;
-                float cosAtSurface = glm::dot(lightDir, surfaceNormal);
-                if (pdfSA > 0.0f && cosAtSurface > 0.0f &&
-                    glm::dot(lightDir, Ng) > 0.0f) {
-                    Spectrum f;
-                    float bsdfPdfL;
-                    evalBSDF(woW, surfaceNormal, surfaceTangent, lightDir,
-                             material, albedo, specColor, f, bsdfPdfL);
-                    if (!isBlack(f)) {
-                        // Re-derive the ray from the OFFSET origin and stop
-                        // just short of the light with a RELATIVE epsilon.
-                        // Using the un-offset distance here is wrong: when the
-                        // normal points at the light, the origin offset brings
-                        // the light's own surface inside tMax and the light
-                        // "shadows" its own sample -- a dark cap on any
-                        // surface directly facing an area light.
-                        Ray shadowRay;
-                        shadowRay.origin = oldIntersect + Ng * 1e-3f;
-                        glm::vec3 sd = pL - shadowRay.origin;
-                        float sdist = glm::length(sd);
-                        shadowRay.direction = sd / sdist;
-                        if (!anyHit(shadowRay, geoms, geoms_size,
-                                    sdist * (1.0f - 1e-3f))) {
-                            Material lMat = materials[L.material.materialId];
-                            Spectrum Le = upliftIlluminant(
-                                lMat.color * lMat.emittance, pathSegment.swl,
-                                lMat.spectrumType, lMat.blackbodyTemp,
-                                lMat.blackbodyNorm);
-                            float weight = powerHeuristic(pdfSA, bsdfPdfL);
-                            pathSegment.radiance += pathSegment.color * f *
-                                                    cosAtSurface * Le * weight /
-                                                    pdfSA;
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- Next-event estimation toward delta (point/directional) lights ---
-        // Delta lights can't be hit by BSDF sampling, so each is a single
-        // shadow-ray sample with no MIS weight (weight = 1).
-        for (int li = 0; li < numDeltaLights && !isSpecular; ++li) {
-            DeltaLight dl = deltaLights[li];
-            glm::vec3 lightDir;
-            float dist;
-            glm::vec3 Li;
-            if (dl.type == POINT_LIGHT) {
-                glm::vec3 d = dl.position - oldIntersect;
-                float dist2 = glm::dot(d, d);
-                dist = sqrtf(dist2);
-                lightDir = d / dist;
-                Li = dl.radiance / dist2; // inverse-square falloff
-            } else {                      // DIRECTIONAL_LIGHT
-                lightDir = -glm::normalize(dl.direction);
-                dist = FLT_MAX;
-                Li = dl.radiance;
-            }
-            float cosAtSurface = glm::dot(lightDir, surfaceNormal);
-            if (cosAtSurface <= 0.0f || glm::dot(lightDir, Ng) <= 0.0f) {
-                continue;
-            }
-            Spectrum f;
-            float bsdfPdfL;
-            evalBSDF(woW, surfaceNormal, surfaceTangent, lightDir, material,
-                     albedo, specColor, f, bsdfPdfL);
-            if (isBlack(f)) {
-                continue;
-            }
-            Ray shadowRay;
-            shadowRay.origin = oldIntersect + Ng * 1e-3f;
-            shadowRay.direction = lightDir;
-            float tMax = (dl.type == POINT_LIGHT) ? dist - 1e-3f : FLT_MAX;
-            if (!anyHit(shadowRay, geoms, geoms_size, tMax)) {
-                Spectrum LiS = upliftIlluminant(Li, pathSegment.swl,
-                                                dl.spectrumType,
-                                                dl.blackbodyTemp,
-                                                dl.blackbodyNorm);
-                pathSegment.radiance +=
-                    pathSegment.color * f * cosAtSurface * LiS;
-            }
+        // Next-event estimation toward all light types (environment, area,
+        // delta), shared with medium scatter events -- see
+        // sampleDirectLighting above. Skipped for delta-only closures (their
+        // f cannot be evaluated for a given direction; the BSDF-sampled ray
+        // finds lights at full MIS weight instead).
+        if (!isSpecular) {
+            sampleDirectLighting(pathSegment, bsdf, oldIntersect,
+                                 /*isSurface=*/true, woW, Ng, envMap, geoms,
+                                 geoms_size, materials, lights, numLights,
+                                 deltaLights, numDeltaLights, rng);
         }
 #endif // USE_MIS
 
-        scatterRay(pathSegment, woW, surfaceNormal, surfaceTangent, wiW, pdf, c,
-                   eta, material, albedo, specColor, texVals, pathSegment.swl,
-                   rng);
+        // Sample the BSDF for the bounce direction. Lobe selection is folded
+        // into the 2D sample inside the closure, exactly as before.
+        glm::vec2 uScatter(u01(rng), u01(rng));
+        BSDFSample bs;
+        bsdf.sample(woW, uScatter, pathSegment.swl, bs);
+        glm::vec3 wiW = bs.wiW;
 
         // Record MIS state for the ray we're about to spawn: the env seen
         // through it (on escape) will be weighted against this pdf, unless the
-        // bounce was specular (then it takes full weight).
-        pathSegment.bsdfPdf = pdf;
-        pathSegment.specularBounce = isSpecular;
+        // sampled lobe was specular/delta (then it takes full weight).
+        pathSegment.bsdfPdf = bs.pdf;
+        pathSegment.specularBounce = hasSpecular(bs.flags);
 
         // Shadow-terminator fix. At grazing/silhouette angles the smooth
         // shading normal tilts away from the real facet, so a cosine sample
@@ -1097,8 +1281,10 @@ __global__ void shade(int iter, int depth, int num_paths,
         // immediately goes into the mesh and self-occludes, leaving a dark rim
         // along silhouettes (e.g. the duck's head edge). For reflective lobes,
         // fold any below-horizon direction back above the geometric tangent
-        // plane. Transmission legitimately goes below, so leave dielectric be.
-        if (material.type != MatType::DIELECTRIC && glm::dot(wiW, Ng) < 0.0f) {
+        // plane. Transmission legitimately goes below, so any closure with a
+        // transmissive lobe is left alone (flags-based, was a dielectric enum
+        // check).
+        if (!hasTransmission(bsdf.flags()) && glm::dot(wiW, Ng) < 0.0f) {
             wiW = glm::normalize(wiW - 2.0f * glm::dot(wiW, Ng) * Ng);
         }
 
@@ -1109,7 +1295,7 @@ __global__ void shade(int iter, int depth, int num_paths,
         // or along wiW does not, which is what produced the dark edge.
         glm::vec3 offsetNormal = glm::dot(wiW, Ng) < 0.0f ? -Ng : Ng;
         pathSegment.ray.origin = oldIntersect + offsetNormal * 1e-3f;
-        pathSegment.color *= c;
+        pathSegment.color *= bs.weight;
 
 // TODO: is it worth it?
 #if (USE_RUSSIAN_ROULETTE) // Possibly terminate the path with Russian roulette
@@ -1117,9 +1303,9 @@ __global__ void shade(int iter, int depth, int num_paths,
             // So that the ray can bounce for a bit before we start terminating
             // it. In SPECTRAL builds this spans all carried wavelengths
             // (terminated secondaries are zero, so the hero drives survival).
-            float maxThroughput = maxComponent(c);
+            float maxThroughput = maxComponent(bs.weight);
             float survivalProbability = u01(rng);
-            float eta_sq = eta * eta;
+            float eta_sq = bs.eta * bs.eta;
             float q = fminf(maxThroughput * eta_sq, 0.99f);
 
             if (q < survivalProbability) {

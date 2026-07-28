@@ -317,6 +317,53 @@ void Scene::loadFromJSON(const std::string &jsonName) {
                 glm::vec3(spec_col[0], spec_col[1], spec_col[2]);
             newMaterial.roughness = p["ROUGHNESS"];
             newMaterial.indexOfRefraction = p["IOR"];
+        } else if (p["TYPE"] == "Medium") {
+            // Participating medium: the geom's interior scatters/absorbs
+            // light; its surface is an invisible null boundary. See the
+            // Material struct and src/render/volume.h.
+            //   SIGMA_A [r,g,b]: absorption per unit distance (default 0.1)
+            //   SIGMA_S [r,g,b]: scattering per unit distance (default 1.0)
+            //   G: Henyey-Greenstein asymmetry in (-1, 1) (default 0)
+            //   DENSITY: global multiplier on both sigmas (default 1)
+            //   HETEROGENEOUS: true -> fbm-noise density field (smoke/cloud)
+            //   NOISE_SCALE / NOISE_OCTAVES: fbm frequency and octave count
+            newMaterial.type = MEDIUM;
+            newMaterial.sigmaA = glm::vec3(0.1f);
+            newMaterial.sigmaS = glm::vec3(1.0f);
+            if (p.contains("SIGMA_A")) {
+                const auto &sa = p["SIGMA_A"];
+                newMaterial.sigmaA = glm::vec3(sa[0], sa[1], sa[2]);
+            }
+            if (p.contains("SIGMA_S")) {
+                const auto &ss = p["SIGMA_S"];
+                newMaterial.sigmaS = glm::vec3(ss[0], ss[1], ss[2]);
+            }
+            newMaterial.hgG = p.value("G", 0.0f);
+            newMaterial.densityScale = p.value("DENSITY", 1.0f);
+            newMaterial.heterogeneous = p.value("HETEROGENEOUS", false) ? 1 : 0;
+            newMaterial.noiseScale = p.value("NOISE_SCALE", 4.0f);
+            newMaterial.noiseOctaves = p.value("NOISE_OCTAVES", 4);
+            // Density-field shape (heterogeneous only): "Fbm" (default),
+            // "Cloud" (cumulus billows), or "Plume" (rising smoke column).
+            newMaterial.mediumProfile = MEDIUM_PROFILE_FBM;
+            if (p.contains("PROFILE")) {
+                const std::string prof = p["PROFILE"];
+                if (prof == "Cloud") {
+                    newMaterial.mediumProfile = MEDIUM_PROFILE_CLOUD;
+                } else if (prof == "Plume") {
+                    newMaterial.mediumProfile = MEDIUM_PROFILE_PLUME;
+                } else if (prof != "Fbm") {
+                    printf("Unknown medium PROFILE \"%s\" (expected \"Fbm\", "
+                           "\"Cloud\" or \"Plume\").\n",
+                           prof.c_str());
+                    exit(-1);
+                }
+            }
+            if (newMaterial.hgG <= -1.0f || newMaterial.hgG >= 1.0f) {
+                printf("Medium G (Henyey-Greenstein asymmetry) must be in "
+                       "(-1, 1).\n");
+                exit(-1);
+            }
         }
 
         MatNameToID[name] = materials.size();
@@ -607,6 +654,17 @@ void Scene::loadFromJSON(const std::string &jsonName) {
         }
 
         newGeom.material.materialId = MatNameToID[mat];
+
+        // Media need an analytic ray/interior interval for distance sampling
+        // and shadow-ray transmittance (volume.h), which only the cube and
+        // sphere primitives provide.
+        if (materials[newGeom.material.materialId].type == MEDIUM &&
+            newGeom.type == MESH) {
+            std::cerr << "Medium materials are only supported on cube and "
+                         "sphere objects (got a mesh)."
+                      << std::endl;
+            exit(-1);
+        }
 
         const auto &trans = p["TRANS"];
         const auto &rotat = p["ROTAT"];

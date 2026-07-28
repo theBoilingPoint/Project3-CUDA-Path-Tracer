@@ -15,7 +15,7 @@
 
 enum GeomType { SPHERE, CUBE, MESH };
 
-enum MatType { DIFFUSE, MIRROR, DIELECTRIC, MICROFACET, TEXTURE };
+enum MatType { DIFFUSE, MIRROR, DIELECTRIC, MICROFACET, TEXTURE, MEDIUM };
 
 struct Ray {
     glm::vec3 origin;
@@ -167,6 +167,28 @@ struct Material {
     // Host-computed scale that normalizes the Planck SPD at blackbodyTemp to
     // unit luminance (set at scene load; see blackbodyLuminanceNorm).
     float blackbodyNorm;
+
+    // --- Participating medium (TYPE "Medium") -----------------------------
+    // A geom with this material encloses a scattering volume; its surface is
+    // a null (invisible, non-refracting) boundary that only toggles the
+    // path's inside-a-medium state. Media must be CUBE or SPHERE geoms (the
+    // shadow-ray overlap test needs an analytic interval) and must not
+    // overlap each other (no nested-media stack is tracked).
+    glm::vec3 sigmaA;   // absorption cross-section per unit distance (RGB)
+    glm::vec3 sigmaS;   // scattering cross-section per unit distance (RGB)
+    float hgG;          // Henyey-Greenstein asymmetry g in (-1, 1); 0 = isotropic
+    float densityScale; // global multiplier on sigmaA/sigmaS
+    int heterogeneous;  // 1: procedural density in [0,1] modulates sigma
+    float noiseScale;   // noise frequency, in units of the geom's local space
+    int noiseOctaves;   // fbm octave count
+    int mediumProfile;  // MediumProfile: shape of the procedural density field
+};
+
+// Procedural density-field shapes for heterogeneous media (JSON "PROFILE").
+enum MediumProfile {
+    MEDIUM_PROFILE_FBM = 0, // plain thresholded fbm filling the geom
+    MEDIUM_PROFILE_CLOUD,   // cumulus: puff-cluster mass + warped erosion
+    MEDIUM_PROFILE_PLUME,   // rising smoke column: cone + twist + break-up
 };
 
 /****** For Texture Loading ******/
@@ -271,6 +293,10 @@ struct PathSegment {
     bool specularBounce;
     float eta; // Used for Russian roulette to determine how likely this ray
                // survives
+    // Index of the geom whose interior medium the ray currently travels
+    // through (-1 = vacuum). Toggled when crossing a MEDIUM-material geom's
+    // null boundary; medium distance sampling runs whenever this is >= 0.
+    int mediumGeom;
 };
 
 // Use with a corresponding PathSegment to do:

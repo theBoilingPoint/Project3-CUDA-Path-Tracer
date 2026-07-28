@@ -70,10 +70,11 @@ set(headers
     src/render/pathtrace.h
     src/render/deviceScene.h
     src/render/intersections.h
-    src/render/interactions.h
+    src/render/bxdf.h
     src/render/bsdf.h
     src/render/spectral.h
     src/render/spectrumData.h
+    src/render/volume.h
     src/render/warp.h
     src/display/preview.h
     src/display/glslUtility.hpp
@@ -89,7 +90,7 @@ set(sources
     src/render/pathtrace.cu
     src/render/deviceScene.cu
     src/render/intersections.cu
-    src/render/interactions.cu
+    src/render/bxdf.cu
     src/render/warp.cu
     src/render/bsdf.cu
     src/render/spectrumData.cu
