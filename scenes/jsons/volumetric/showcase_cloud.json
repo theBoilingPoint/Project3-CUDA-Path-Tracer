@@ -1,0 +1,59 @@
+{
+  "Materials": {
+    "sky": {
+      "TYPE": "Emitting",
+      "RGB": [0.18, 0.38, 0.75],
+      "EMITTANCE": 0.18,
+      "SPECTRUM": "D65"
+    },
+    "cloud": {
+      "TYPE": "Medium",
+      "SIGMA_A": [0.035, 0.040, 0.050],
+      "SIGMA_S": [0.78, 0.80, 0.84],
+      "G": 0.65,
+      "DENSITY": 1.20,
+      "HETEROGENEOUS": true,
+      "PROFILE": "Cloud",
+      "NOISE_SCALE": 6.5,
+      "NOISE_OCTAVES": 5,
+      "NOISE_SEED": 44
+    }
+  },
+  "Lights": [
+    {
+      "TYPE": "Point",
+      "POSITION": [-8.0, 12.0, -8.0],
+      "RGB": [1.0, 0.91, 0.76],
+      "SPECTRUM": "D65",
+      "INTENSITY": 500.0
+    }
+  ],
+  "Camera": {
+    "RES": [800, 450],
+    "FOVY": 34.0,
+    "ITERATIONS": 1536,
+    "DEPTH": 36,
+    "FILE": "showcase_cloud",
+    "EXPOSURE": -0.15,
+    "TONEMAP": true,
+    "EYE": [0.0, 3.6, 15.0],
+    "LOOKAT": [0.0, 5.7, -3.0],
+    "UP": [0.0, 1.0, 0.0]
+  },
+  "Objects": [
+    {
+      "TYPE": "cube",
+      "MATERIAL": "sky",
+      "TRANS": [0.0, 0.0, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [120.0, 120.0, 120.0]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "cloud",
+      "TRANS": [0.0, 5.7, -3.0],
+      "ROTAT": [0.0, -8.0, 0.0],
+      "SCALE": [12.0, 6.5, 6.0]
+    }
+  ]
+}

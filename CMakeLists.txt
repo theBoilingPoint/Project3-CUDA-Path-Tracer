@@ -61,6 +61,7 @@ endif()
 
 set(headers
     src/core/main.h
+    src/core/color.h
     src/core/utilities.h
     src/core/cudaUtil.h
     src/scene/scene.h

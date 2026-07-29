@@ -117,11 +117,6 @@ Below is the image of the default Cornell box scene with a mirror material.
 
 The average time for each frame is 533.5 ms and the FPS is 1.9.
 
-### *Blooper*: Dark Ring for the Mirror Material
-This took me so long to debug. At the beginning my mirror material looked like this:
-![](./img/baseCredit/dark_ring_mirror.png).
-I had absolutely no idea why because the feature was so simple. At the end I found out that GLM's reflect uses an inverse version of the original physics equation. The lesson to learn is never take APIs for granted. Always read what they actually do.
-
 ## Performance/Visual Improvements
 > - The scene file to test **stream compaction** and **matwrial sort** features is in `../scenes/jsons/test_performance/`. Remember to replace the path to the meshes and textures with the absolute path on your machine.
 > - The scene file to test **antialiasing** is the default cornell box scene.
@@ -407,34 +402,42 @@ Costs: the path state grows by 32 bytes (wavelengths + pdfs), throughput/radianc
 
 ## Volumetric Rendering (Participating Media)
 
-The renderer supports **participating media** — smoke, clouds, and colored fog — as first-class citizens of the path integral, following the null-scattering formulation used by [PBRT-v4's `VolPathIntegrator`](https://pbr-book.org/4ed/Light_Transport_II_Volume_Rendering/Volume_Scattering_Integrators) ([Miller, Georgiev & Jarosz 2019](https://cs.dartmouth.edu/~wjarosz/publications/miller19null.html)). Any cube or sphere geom can be turned into a volume by giving it a `Medium` material; its surface becomes an **invisible null boundary** and its interior scatters and absorbs light.
+The renderer supports participating media as first-class path-integral
+participants, following the null-scattering formulation used by
+[PBRT-v4's `VolPathIntegrator`](https://pbr-book.org/4ed/Light_Transport_II_Volume_Rendering/Volume_Scattering_Integrators).
+Any cube or sphere geom can be turned into a volume by giving it a `Medium`
+material; its surface becomes an invisible null boundary and its interior can
+scatter, absorb, and emit light.
 
-|![](./img/volumetric_cloud_sky.png)|
-|:--:|
-|**Cumulus cloud** (`./scenes/jsons/volumetric/cloud_sky.json`, spectral build, 1280×720, 1500 spp, depth 32): a procedural cumulus (`PROFILE: "Cloud"` — distinct hash-placed lobes and towers over a flat condensation base, carved throughout by domain-warped inverted-Worley billows) inside a sky dome, side-lit by a small ultra-bright sun sphere. The white comes entirely from high-order multiple scattering (albedo ≈ 0.997, up to 32 bounces of delta-tracked transport); no surface, no shortcuts|
+The following are the current tuned showcase renders. See
+[`TODO.md`](./TODO.md) for the full diagnosis, measurements, commands, and
+remaining limitations.
 
-|![](./img/volumetric_smoke.png)|
-|:--:|
-|**Rising smoke plume** (`./scenes/jsons/volumetric/cornell_smoke.json`, spectral build, 1280×720, 1500 spp, depth 16): a green scattering plume (`PROFILE: "Plume"` — a stack of swelling puff balls along a wandering, spiraling rise path, eroded by Worley billows that strengthen with height into a mushrooming head) rising off a diffuse sphere. The green is spectral: `SIGMA_S` scatters green while `SIGMA_A` absorbs red/blue, so both the in-scattered glow and the transmitted shadow are wavelength-correct|
+| Cloud | Fog |
+|:--:|:--:|
+| ![](./img/volumetric_cloud_showcase.png) | ![](./img/volumetric_fog_showcase.png) |
+| Smoke | Fire |
+| ![](./img/volumetric_smoke_showcase.png) | ![](./img/volumetric_fire_showcase.png) |
 
-|![](./img/volumetric_fog_cloud.png)|
+| Combined cloud, fog, smoke, and fire |
 |:--:|
-|**Cloud + colored fog** (`./scenes/jsons/volumetric/cornell_fog_cloud.json`, spectral build, 1280×720, 1200 spp, depth 16): a forward-scattering cloud-profile volume under the light, and a **homogeneous amber fog sphere** whose color comes purely from wavelength-dependent absorption (`SIGMA_A` absorbs blue strongly) — the spectral transmittance `exp(-σ_t(λ)·d)` deepens toward the core, exactly like real colored liquids|
+| ![](./img/volumetric_combined_showcase.png) |
 
 ### Scene description
 
 ```json
-"green_smoke":
+"smoke":
 {
     "TYPE":"Medium",
-    "SIGMA_A":[1.6, 0.05, 1.5],
-    "SIGMA_S":[0.25, 1.8, 0.3],
-    "G":0.15,
-    "DENSITY":6.5,
+    "SIGMA_A":[0.58, 0.54, 0.50],
+    "SIGMA_S":[0.16, 0.17, 0.19],
+    "G":0.32,
+    "DENSITY":1.35,
     "HETEROGENEOUS":true,
     "PROFILE":"Plume",
-    "NOISE_SCALE":4.5,
-    "NOISE_OCTAVES":5
+    "NOISE_SCALE":6.3,
+    "NOISE_OCTAVES":5,
+    "NOISE_SEED":29
 }
 ```
 
@@ -442,9 +445,23 @@ The renderer supports **participating media** — smoke, clouds, and colored fog
 - `G` — [Henyey-Greenstein](https://www.astro.umd.edu/~jph/HG_note.pdf) phase-function asymmetry in (-1, 1): 0 is isotropic, positive scatters forward (clouds are strongly forward-scattering).
 - `DENSITY` — global multiplier on both sigmas.
 - `HETEROGENEOUS` — `true` evaluates a procedural density field in the geom's local space; `false` is a uniform medium.
-- `PROFILE` — the density field's large-scale shape: `"Fbm"` (thresholded value-noise wisps), `"Cloud"` (cumulus: distinct hash-placed lobes and towers over a flat base, remapped through the whole interior by domain-warped **inverted-Worley** billows — the cellular noise is what makes cauliflower florets; smooth value noise cannot), or `"Plume"` (rising smoke column: a stack of swelling puff balls along a wandering, spiraling path — fluid plumes are stacked vortex rings, and a noised cone always reads as a funnel — eroded by Worley billows that strengthen with height). Real volumes are a large-scale *shape* decorated by noise; noise alone in a bounding box reads as a fuzzy blob, which is why the profiles exist. `NOISE_SCALE`/`NOISE_OCTAVES` control the decorating noise.
+- `PROFILE` — the density field's large-scale shape: `"Fbm"` for generic
+  thresholded wisps, `"Cloud"` for a connected smooth-summed bank of
+  anisotropic 3-D updraft fields with an irregular base and volumetric
+  erosion, `"Plume"` for a continuous expanding smoke column around an
+  advected axis, `"Fog"` for a soft low bank, or `"Flame"` for tapered and
+  forked fire tongues. `NOISE_SCALE`, `NOISE_OCTAVES`, and `NOISE_SEED`
+  control the decorating noise.
+- `EMISSION` — optional scalar volumetric-emission strength.
+  `EMISSION_RGB` or `SPECTRUM` sets its color. The `Flame` profile modulates
+  emission spatially and by a relative temperature field.
 
-Media must be **cube or sphere** geoms (the shadow-ray transmittance needs an analytic ray/interior interval), must not be nested or overlap each other, and cannot be emissive; the camera must start in vacuum. All of this is validated at scene load.
+Media must be cube or sphere geoms because shadow transmittance needs an
+analytic ray/interior interval. Media may emit, but nested or overlapping
+containers are not supported because each path currently stores one active
+medium. The camera must start in vacuum. Geometry type and camera placement
+are validated at scene load; scene authors must keep medium containers
+disjoint.
 
 ### Method
 
@@ -464,16 +481,30 @@ If the sampled distance passes the surface, the path continues to the surface wi
 
 **Transmittance on shadow rays.** Every NEE shadow ray is now transmittance-aware (`shadowTransmittance`): opaque geometry still blocks, but medium boundaries don't — instead the ray's overlap interval with each medium is computed analytically (slab test / quadratic in the geom's local space) and the transmittance along it is accumulated: analytically (`exp(−σ_t d)`) for homogeneous media, and with **ratio tracking** ([Novák et al. 2014](https://cs.dartmouth.edu/~wjarosz/publications/novak14residual.html)) for heterogeneous ones, with Russian roulette on nearly-opaque channels to bound the loop. This gives volumes correct soft, colored shadows and lets surfaces inside a volume receive properly attenuated direct light.
 
-**Unbiasedness.** Delta tracking and ratio tracking are unbiased estimators of the free-flight distribution and transmittance for *any* density field bounded by the majorant — no ray-marching step size, no banding. Every density profile is clamped to [0, 1] by construction (times `DENSITY`), so the majorant is exact.
+**Volume emission.** Every traveled segment of an emissive medium independently
+estimates `∫ T(0,s) j(s) ds` using four full-spectrum stratified samples.
+Homogeneous transmittance is analytic and heterogeneous transmittance is
+ratio-tracked. The flame profile supplies spatial source strength and a
+relative blackbody temperature; a small point-light proxy is still used when
+the flame must illuminate exterior surfaces directly.
+
+**Tracking correctness.** Delta tracking and ratio tracking are unbiased
+estimators of free-flight and transmittance for density fields bounded by the
+majorant. Every authored profile is clamped to [0, 1] by construction (times
+`DENSITY`), and the 10,000-event safety cap is unreachable at the showcase
+scenes' optical depths. There is no ray-marching step size or step banding.
 
 ### Validation
 
 - A `Medium` geom with `SIGMA_A = SIGMA_S = 0` is invisible: renders match the medium-free scene.
-- Homogeneous vs. heterogeneous with a constant density field (noise disabled) agree — delta tracking reduces to the analytic case.
 - Scenes without media are unaffected: the plain Cornell box renders identically before and after the volumetric integration (the medium code is skipped entirely when `mediumGeom` is −1).
 - The amber fog sphere's transmitted color deepens with path length through the sphere (Beer-Lambert), and its shadow on the floor is correspondingly tinted.
 
-Costs: each path stores one extra `int`; scenes without media pay only a per-bounce branch. In media, cost scales with `σ_maj × path length` (expected number of tracking steps) plus one transmittance walk per shadow ray.
+Costs: each path stores the active-medium index and accumulated real-vertex
+distance used by MIS; scenes without media pay only a per-bounce branch. In
+media, cost scales with `σ_maj × path length` (expected number of tracking
+steps) plus one transmittance walk per shadow ray. Emissive media additionally
+use four stratified source samples per traveled segment.
 
 ## Mesh Loading
 This project supports .obj/.gltf/.glb file loading. I read the data from the files using tinyobjloader and tinygltf. 

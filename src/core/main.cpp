@@ -1,6 +1,14 @@
 #include "main.h"
+#include "color.h"
 #include "preview.h"
+#include <chrono>
 #include <cstring>
+#include <filesystem>
+#include <vector>
+
+#ifdef USE_OIDN
+#include <OpenImageDenoise/oidn.hpp>
+#endif
 
 // Force NVIDIA GPU on Optimus / hybrid-graphics laptops so that the OpenGL
 // context and the CUDA device are on the same physical GPU.
@@ -8,6 +16,10 @@ extern "C" { __declspec(dllexport) unsigned long NvOptimusEnablement = 1; }
 extern "C" { __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1; }
 
 static std::string startTimeString;
+static bool headlessMode = false;
+static bool denoiseMode = false;
+static std::string outputBaseOverride;
+static int sppOverride = 0;
 
 // For camera controls
 static bool leftMousePressed = false;
@@ -42,11 +54,36 @@ int main(int argc, char** argv)
 
     if (argc < 2)
     {
-        printf("Usage: %s SCENEFILE.json\n", argv[0]);
+        printf("Usage: %s SCENEFILE.json [--headless] [--denoise] [--spp N] "
+               "[--output FILE_BASE]\n",
+               argv[0]);
         return 1;
     }
 
     const char* sceneFile = argv[1];
+    for (int i = 2; i < argc; ++i) {
+        if (strcmp(argv[i], "--headless") == 0) {
+            headlessMode = true;
+        } else if (strcmp(argv[i], "--denoise") == 0) {
+            denoiseMode = true;
+        } else if (strcmp(argv[i], "--spp") == 0 && i + 1 < argc) {
+            sppOverride = atoi(argv[++i]);
+            if (sppOverride <= 0) {
+                fprintf(stderr, "--spp must be a positive integer.\n");
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
+            outputBaseOverride = argv[++i];
+            if (outputBaseOverride.size() >= 4 &&
+                outputBaseOverride.substr(outputBaseOverride.size() - 4) ==
+                    ".png") {
+                outputBaseOverride.resize(outputBaseOverride.size() - 4);
+            }
+        } else {
+            fprintf(stderr, "Unknown or incomplete option: %s\n", argv[i]);
+            return 1;
+        }
+    }
 
     // Load scene file
     scene = new Scene(sceneFile);
@@ -60,6 +97,45 @@ int main(int argc, char** argv)
     Camera& cam = renderState->camera;
     width = cam.resolution.x;
     height = cam.resolution.y;
+    if (sppOverride > 0) {
+        renderState->iterations = (unsigned int)sppOverride;
+    }
+
+    if (headlessMode) {
+        cudaError_t deviceErr = cudaSetDevice(0);
+        if (deviceErr != cudaSuccess) {
+            fprintf(stderr, "cudaSetDevice(0) failed: %s\n",
+                    cudaGetErrorString(deviceErr));
+            return 1;
+        }
+
+        printf("Headless render: %dx%d, %u spp, depth %d\n", width, height,
+               renderState->iterations, renderState->traceDepth);
+        const auto begin = std::chrono::steady_clock::now();
+        pathtraceInit(scene);
+        for (iteration = 1; iteration <= (int)renderState->iterations;
+             ++iteration) {
+            pathtrace(nullptr, 0, iteration);
+            if (iteration == 1 || iteration % 25 == 0 ||
+                iteration == (int)renderState->iterations) {
+                printf("  %d / %u spp\n", iteration, renderState->iterations);
+            }
+        }
+        // The for-loop increment leaves `iteration` at N + 1; saveImage uses
+        // it as the accumulation divisor, so restore the actual sample count.
+        iteration = (int)renderState->iterations;
+        bool saved = saveImage();
+        pathtraceFree();
+        const auto end = std::chrono::steady_clock::now();
+        const double seconds =
+            std::chrono::duration<double>(end - begin).count();
+        printf("Headless render completed in %.2f s (%.3f s/spp).\n", seconds,
+               seconds / (double)renderState->iterations);
+        delete guiData;
+        delete scene;
+        cudaDeviceReset();
+        return saved ? 0 : 1;
+    }
 
     glm::vec3 view = cam.view;
     glm::vec3 up = cam.up;
@@ -95,30 +171,136 @@ int main(int argc, char** argv)
     return 0;
 }
 
-void saveImage()
+#ifdef USE_OIDN
+static bool denoiseLinearImage(std::vector<glm::vec3> &pixels) {
+    const size_t pixelCount = pixels.size();
+    const size_t floatCount = 3 * pixelCount;
+    const size_t byteCount = floatCount * sizeof(float);
+    std::vector<float> input(floatCount);
+    std::vector<float> output(floatCount);
+    for (size_t i = 0; i < pixelCount; ++i) {
+        input[3 * i + 0] = fmaxf(pixels[i].x, 0.0f);
+        input[3 * i + 1] = fmaxf(pixels[i].y, 0.0f);
+        input[3 * i + 2] = fmaxf(pixels[i].z, 0.0f);
+    }
+
+    oidn::DeviceRef device = oidn::newDevice(oidn::DeviceType::CUDA);
+    if (!device) {
+        fprintf(stderr, "OIDN CUDA device creation failed; saving raw PNG.\n");
+        return false;
+    }
+    device.commit();
+
+    oidn::BufferRef inputBuffer = device.newBuffer(byteCount);
+    oidn::BufferRef outputBuffer = device.newBuffer(byteCount);
+    inputBuffer.write(0, byteCount, input.data());
+
+    oidn::FilterRef filter = device.newFilter("RT");
+    filter.setImage("color", inputBuffer, oidn::Format::Float3, width, height);
+    filter.setImage("output", outputBuffer, oidn::Format::Float3, width, height);
+    filter.set("hdr", true);
+    filter.set("quality", oidn::Quality::High);
+    filter.commit();
+    filter.execute();
+    device.sync();
+
+    const char *errorMessage = nullptr;
+    if (device.getError(errorMessage) != oidn::Error::None) {
+        fprintf(stderr, "OIDN failed: %s; saving raw PNG.\n",
+                errorMessage ? errorMessage : "unknown error");
+        return false;
+    }
+
+    outputBuffer.read(0, byteCount, output.data());
+    for (size_t i = 0; i < pixelCount; ++i) {
+        pixels[i] = glm::max(
+            glm::vec3(output[3 * i + 0], output[3 * i + 1],
+                      output[3 * i + 2]),
+            glm::vec3(0.0f));
+    }
+    return true;
+}
+#endif
+
+bool saveImage()
 {
+    if (iteration <= 0) {
+        fprintf(stderr, "Cannot save before at least one sample is rendered.\n");
+        return false;
+    }
     float samples = iteration;
     // output image file
     Image img(width, height);
+    Image rawPreview(width, height);
+    Image linearImg(width, height);
+    std::vector<glm::vec3> rawPixels(width * height);
 
     for (int x = 0; x < width; x++)
     {
         for (int y = 0; y < height; y++)
         {
             int index = x + (y * width);
-            glm::vec3 pix = renderState->image[index];
-            img.setPixel(width - 1 - x, y, glm::vec3(pix) / samples);
+            rawPixels[index] = renderState->image[index] / samples;
         }
     }
 
-    std::string filename = renderState->imageName;
-    std::ostringstream ss;
-    ss << filename << "." << startTimeString << "." << samples << "samp";
-    filename = ss.str();
+    std::vector<glm::vec3> displayPixels = rawPixels;
+    if (denoiseMode) {
+#ifdef USE_OIDN
+        if (denoiseLinearImage(displayPixels)) {
+            printf("Denoised display PNG with OIDN CUDA (raw HDR preserved).\n");
+        }
+#else
+        fprintf(stderr,
+                "--denoise requested, but this build does not include OIDN.\n");
+#endif
+    }
 
-    // CHECKITOUT
-    img.savePNG(filename);
-    //img.saveHDR(filename);  // Save a Radiance HDR file
+    for (int x = 0; x < width; x++) {
+        for (int y = 0; y < height; y++) {
+            int index = x + (y * width);
+            linearImg.setPixel(width - 1 - x, y, rawPixels[index]);
+            rawPreview.setPixel(
+                width - 1 - x, y,
+                displayTransform(rawPixels[index],
+                                 renderState->camera.exposure,
+                                 renderState->camera.toneMap));
+            glm::vec3 pix =
+                displayTransform(displayPixels[index],
+                                 renderState->camera.exposure,
+                                 renderState->camera.toneMap);
+            img.setPixel(width - 1 - x, y, pix);
+        }
+    }
+
+    std::string filename = outputBaseOverride;
+    if (filename.empty()) {
+        filename = renderState->imageName;
+        std::ostringstream ss;
+        ss << filename << "." << startTimeString << "." << samples << "samp";
+        filename = ss.str();
+    }
+
+    std::filesystem::path outputPath(filename);
+    if (outputPath.has_parent_path()) {
+        std::error_code ec;
+        std::filesystem::create_directories(outputPath.parent_path(), ec);
+        if (ec) {
+            fprintf(stderr, "Failed to create output directory \"%s\": %s\n",
+                    outputPath.parent_path().string().c_str(),
+                    ec.message().c_str());
+            return false;
+        }
+    }
+
+    bool saved = img.savePNG(filename);
+    if (denoiseMode) {
+        saved = rawPreview.savePNG(filename + ".raw") && saved;
+    }
+    if (headlessMode) {
+        saved = linearImg.saveHDR(filename) && saved;
+    }
+    return saved;
 }
 
 void runCuda()

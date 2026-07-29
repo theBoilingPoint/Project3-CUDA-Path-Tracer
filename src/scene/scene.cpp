@@ -343,8 +343,27 @@ void Scene::loadFromJSON(const std::string &jsonName) {
             newMaterial.heterogeneous = p.value("HETEROGENEOUS", false) ? 1 : 0;
             newMaterial.noiseScale = p.value("NOISE_SCALE", 4.0f);
             newMaterial.noiseOctaves = p.value("NOISE_OCTAVES", 4);
+            newMaterial.noiseSeed = p.value("NOISE_SEED", 0);
+
+            // Optional continuous volume emission. This is deliberately
+            // separate from SIGMA_A/SIGMA_S: EMISSION is a source term per
+            // unit distance, while the sigma values control attenuation.
+            if (p.contains("EMISSION")) {
+                newMaterial.emittance = p["EMISSION"];
+                newMaterial.color = glm::vec3(1.0f);
+                if (p.contains("EMISSION_RGB")) {
+                    const auto &ec = p["EMISSION_RGB"];
+                    newMaterial.color = glm::vec3(ec[0], ec[1], ec[2]);
+                }
+                parseSpectrum(p, newMaterial.color, newMaterial.spectrumType,
+                              newMaterial.blackbodyTemp,
+                              newMaterial.blackbodyNorm);
+            }
+
             // Density-field shape (heterogeneous only): "Fbm" (default),
-            // "Cloud" (cumulus billows), or "Plume" (rising smoke column).
+            // "Cloud" (cumulus billows), "Plume" (rising smoke column), or
+            // "Flame" (tapered, forked fire), or "Fog" (soft atmospheric
+            // height layer).
             newMaterial.mediumProfile = MEDIUM_PROFILE_FBM;
             if (p.contains("PROFILE")) {
                 const std::string prof = p["PROFILE"];
@@ -352,16 +371,40 @@ void Scene::loadFromJSON(const std::string &jsonName) {
                     newMaterial.mediumProfile = MEDIUM_PROFILE_CLOUD;
                 } else if (prof == "Plume") {
                     newMaterial.mediumProfile = MEDIUM_PROFILE_PLUME;
+                } else if (prof == "Flame") {
+                    newMaterial.mediumProfile = MEDIUM_PROFILE_FLAME;
+                } else if (prof == "Fog") {
+                    newMaterial.mediumProfile = MEDIUM_PROFILE_FOG;
                 } else if (prof != "Fbm") {
                     printf("Unknown medium PROFILE \"%s\" (expected \"Fbm\", "
-                           "\"Cloud\" or \"Plume\").\n",
+                           "\"Cloud\", \"Plume\", \"Flame\", or \"Fog\").\n",
                            prof.c_str());
                     exit(-1);
                 }
             }
+            if (p.contains("PROFILE") && !newMaterial.heterogeneous) {
+                printf("Medium PROFILE requires HETEROGENEOUS=true; otherwise "
+                       "the selected density field would be ignored.\n");
+                exit(-1);
+            }
             if (newMaterial.hgG <= -1.0f || newMaterial.hgG >= 1.0f) {
                 printf("Medium G (Henyey-Greenstein asymmetry) must be in "
                        "(-1, 1).\n");
+                exit(-1);
+            }
+            if (glm::any(glm::lessThan(newMaterial.sigmaA, glm::vec3(0.0f))) ||
+                glm::any(glm::lessThan(newMaterial.sigmaS, glm::vec3(0.0f))) ||
+                newMaterial.densityScale < 0.0f ||
+                newMaterial.emittance < 0.0f) {
+                printf("Medium SIGMA_A, SIGMA_S, DENSITY, and EMISSION must "
+                       "be non-negative.\n");
+                exit(-1);
+            }
+            if (newMaterial.noiseScale <= 0.0f ||
+                newMaterial.noiseOctaves < 1 ||
+                newMaterial.noiseOctaves > 8) {
+                printf("Medium NOISE_SCALE must be > 0 and NOISE_OCTAVES must "
+                       "be in [1, 8].\n");
                 exit(-1);
             }
         }
@@ -691,7 +734,8 @@ void Scene::loadFromJSON(const std::string &jsonName) {
         // would still be MIS-down-weighted when a BSDF ray hits it (losing
         // energy), and multi-emitter scenes need distinct material names
         // (e.g. the per-spectrum light panels in the spectral demo scenes).
-        if (materials[newGeom.material.materialId].emittance > 0.0f) {
+        if (materials[newGeom.material.materialId].emittance > 0.0f &&
+            materials[newGeom.material.materialId].type != MEDIUM) {
             lights.push_back(newGeom);
             // Non-owning copy: shares geomMeshData's host pointers (freed once,
             // via geomMeshData).
@@ -699,7 +743,13 @@ void Scene::loadFromJSON(const std::string &jsonName) {
         }
     }
 
-    if (lights.size() == 0 && !hasEnvMap && deltaLights.empty()) {
+    bool hasEmissiveMedium = false;
+    for (const Geom &g : geoms) {
+        const Material &m = materials[g.material.materialId];
+        hasEmissiveMedium |= m.type == MEDIUM && m.emittance > 0.0f;
+    }
+    if (lights.size() == 0 && !hasEnvMap && deltaLights.empty() &&
+        !hasEmissiveMedium) {
         std::cerr
             << "No lights and no environment map found in the scene, your "
                "render will be pitch black!"
@@ -723,6 +773,28 @@ void Scene::loadFromJSON(const std::string &jsonName) {
     camera.lookAt = glm::vec3(lookat[0], lookat[1], lookat[2]);
     camera.up = glm::vec3(up[0], up[1], up[2]);
 
+    // The path state currently assumes the camera begins in vacuum. Reject a
+    // camera inside a medium explicitly instead of misclassifying the first
+    // exit surface as an entry boundary.
+    for (const Geom &g : geoms) {
+        if (materials[g.material.materialId].type != MEDIUM) {
+            continue;
+        }
+        glm::vec3 pl = glm::vec3(
+            g.transform.inverseTransform * glm::vec4(camera.position, 1.0f));
+        bool inside = g.type == SPHERE
+                          ? glm::dot(pl, pl) < 0.25f
+                          : glm::all(glm::lessThan(glm::abs(pl),
+                                                   glm::vec3(0.5f)));
+        if (inside) {
+            std::cerr << "Camera starts inside a participating medium. This "
+                         "renderer currently requires a vacuum camera; move "
+                         "the camera or the medium boundary."
+                      << std::endl;
+            exit(-1);
+        }
+    }
+
     // Default to no depth of field. These MUST be written even when the JSON
     // omits them: Camera is a plain struct with no initializers, so leaving
     // them untouched reads uninitialized memory -- when that garbage happened
@@ -731,6 +803,8 @@ void Scene::loadFromJSON(const std::string &jsonName) {
     // renders that came and went with unrelated heap-layout changes).
     camera.lensRadius = 0.0f;
     camera.focalDistance = 0.0f;
+    camera.exposure = cameraData.value("EXPOSURE", 0.0f);
+    camera.toneMap = cameraData.value("TONEMAP", false) ? 1 : 0;
 
     if (!cameraData.contains("LENS_RADIUS")) {
         printf("You haven't specified "
@@ -751,9 +825,12 @@ void Scene::loadFromJSON(const std::string &jsonName) {
     }
 
     // calculate fov based on resolution
-    float yscaled = tan(fovy * (PI / 180));
+    // FOVY is the full vertical field of view. The image-plane half-height is
+    // tan(FOVY / 2), not tan(FOVY). The previous expression silently doubled
+    // every authored field of view (45 degrees rendered as roughly 90).
+    float yscaled = tan(0.5f * fovy * (PI / 180));
     float xscaled = (yscaled * camera.resolution.x) / camera.resolution.y;
-    float fovx = (atan(xscaled) * 180) / PI;
+    float fovx = (2.0f * atan(xscaled) * 180) / PI;
 
     camera.fov = glm::vec2(fovx, fovy);
 

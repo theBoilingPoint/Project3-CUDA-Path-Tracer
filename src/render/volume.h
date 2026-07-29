@@ -52,17 +52,36 @@ __host__ __device__ inline float sampleHGCosTheta(float g, float u) {
         return 1.0f - 2.0f * u; // isotropic limit
     }
     float s = (1.0f - g * g) / (1.0f + g - 2.0f * g * u);
-    return (1.0f + g * g - s * s) / (2.0f * g);
+    return glm::clamp((1.0f + g * g - s * s) / (2.0f * g), -1.0f,
+                      1.0f);
 }
 
 // --- Procedural density field (heterogeneous media) -------------------------
 
 // Deterministic lattice hash -> [0, 1].
-__host__ __device__ inline float noiseHash(int x, int y, int z) {
-    unsigned int h = (unsigned int)(x * 73856093) ^
-                     (unsigned int)(y * 19349663) ^
-                     (unsigned int)(z * 83492791);
+__host__ __device__ inline float noiseHashUnsigned(unsigned int x,
+                                                   unsigned int y,
+                                                   unsigned int z) {
+    unsigned int h =
+        x * 73856093u ^ y * 19349663u ^ z * 83492791u;
     return (float)(utilhash(h) & 0x00FFFFFFu) / 16777215.0f;
+}
+
+__host__ __device__ inline float noiseHash(int x, int y, int z) {
+    // Convert before multiplication so negative lattice coordinates wrap in
+    // well-defined unsigned arithmetic instead of invoking signed-overflow UB.
+    return noiseHashUnsigned((unsigned int)x, (unsigned int)y,
+                             (unsigned int)z);
+}
+
+__host__ __device__ inline glm::vec3 noiseSeedOffset(int seed) {
+    // Add the arbitrary decorrelation constants in unsigned arithmetic too:
+    // JSON accepts the full int range, so `seed + constant` must not overflow.
+    unsigned int s = (unsigned int)seed;
+    return glm::vec3(noiseHashUnsigned(s + 17u, 31u, 47u),
+                     noiseHashUnsigned(s + 59u, 71u, 89u),
+                     noiseHashUnsigned(s + 97u, 101u, 131u)) *
+           53.0f;
 }
 
 // 3D value noise: trilinear interpolation of lattice hashes with a smoothstep
@@ -141,97 +160,259 @@ __host__ __device__ inline float billowFbm(const glm::vec3 &p) {
 // fbm, the standard game/film procedural-volume recipe (cf. the "Nubis"
 // cloudscapes talks and production VDB assets these emulate).
 
-// Cumulus profile: distinct large lobes (kept unmerged so the valleys
-// between them survive and self-shadow) plus smaller towers on top, with
-// inverted-Worley billow erosion applied as a REMAP through the whole
-// volume -- interior structure, not just a decorated boundary.
-__host__ __device__ inline float cloudDensity(const glm::vec3 &pl,
-                                              float noiseScale, int octaves) {
-    // Large lobes along the long axis.
-    float base = 0.0f;
-    for (int i = 0; i < 6; ++i) {
-        glm::vec3 c((noiseHash(i, 1, 7) - 0.5f) * 0.62f,
-                    noiseHash(i, 3, 11) * 0.16f - 0.10f,
-                    (noiseHash(i, 5, 13) - 0.5f) * 0.30f);
-        float r = 0.16f + 0.20f * noiseHash(i, 7, 17);
-        glm::vec3 d = pl - c;
-        d.y /= 0.85f;
-        base = fmaxf(base, 1.0f - glm::length(d) / r);
-    }
-    // Smaller cauliflower towers rising off the top.
-    for (int i = 6; i < 10; ++i) {
-        glm::vec3 c((noiseHash(i, 1, 7) - 0.5f) * 0.55f,
-                    0.06f + noiseHash(i, 3, 11) * 0.20f,
-                    (noiseHash(i, 5, 13) - 0.5f) * 0.26f);
-        float r = 0.10f + 0.12f * noiseHash(i, 7, 17);
-        base = fmaxf(base, 1.0f - glm::length(pl - c) / r);
-    }
-    base = glm::clamp(base * 1.25f, 0.0f, 1.0f);
-    // Flat cloud base: real cumulus condense above a sharp altitude line.
-    base *= glm::clamp((pl.y + 0.26f) / 0.08f, 0.0f, 1.0f);
-    if (base <= 0.0f) {
-        return 0.0f;
-    }
-
-    // Domain-warped billow (inverted Worley) + fine value-noise detail,
-    // combined into an erosion threshold and REMAPPED: carves florets into
-    // the interior and crenellates the silhouette.
-    glm::vec3 q = pl * noiseScale;
-    glm::vec3 warp(valueNoise(q * 0.35f + glm::vec3(13.1f)),
-                   valueNoise(q * 0.35f + glm::vec3(47.7f)),
-                   valueNoise(q * 0.35f + glm::vec3(91.3f)));
-    float billow = billowFbm(q * 0.5f + 0.9f * (warp - glm::vec3(0.5f)));
-    float det = fbm(q * 1.7f, octaves > 4 ? octaves - 2 : 2);
-    float ero = (1.0f - billow) * 0.62f + (1.0f - det) * 0.13f;
-    return glm::clamp((base - ero) / fmaxf(1.0f - ero, 1e-3f), 0.0f, 1.0f);
+// A smooth anisotropic updraft field used by the cumulus macro shape. Several
+// heavily overlapping fields are summed and saturated below; unlike a
+// max-union of spheres, no individual primitive boundary survives.
+__host__ __device__ inline float
+cloudUpdraftField(const glm::vec3 &p, const glm::vec3 &center,
+                  const glm::vec3 &radius, float weight) {
+    glm::vec3 d = (p - center) / radius;
+    return weight * expf(-2.25f * glm::dot(d, d));
 }
 
-// Rising-plume profile: a stack of puff balls along a wandering, gently
-// spiraling rise path -- small and tight at the base, swelling into a
-// mushrooming head -- eroded by Worley billows that strengthen with height.
-// Fluid-sim plumes are essentially stacked vortex rings, which this mimics;
-// a noised cone reads as a funnel no matter how it is decorated.
+// Cumulus profile: a genuinely three-dimensional implicit mass built from
+// smooth-summed anisotropic updrafts, then carved by domain-warped
+// value-noise/Worley detail. This avoids both the old cotton-ball max union
+// and the projected cutout of a single-valued top height field.
+__host__ __device__ inline float cloudDensity(const glm::vec3 &pl,
+                                              float noiseScale, int octaves,
+                                              int seed) {
+    glm::vec3 seedP = noiseSeedOffset(seed);
+
+    // Low-frequency 3-D warp destroys the analytic axes of the updraft fields
+    // without breaking their connected mass into independent puffs.
+    glm::vec3 macroQ = pl * glm::vec3(1.75f, 1.35f, 1.85f) + seedP;
+    glm::vec3 macroWarp(
+        fbm(macroQ * 0.70f + glm::vec3(11.3f, 3.7f, 19.1f), 3),
+        fbm(macroQ * 0.70f + glm::vec3(29.7f, 7.1f, 5.3f), 3),
+        fbm(macroQ * 0.70f + glm::vec3(2.9f, 37.7f, 13.9f), 3));
+    glm::vec3 p =
+        pl + (macroWarp - glm::vec3(0.5f)) *
+                 glm::vec3(0.10f, 0.065f, 0.10f);
+
+    // Broad condensation shelf, tall core, two shoulders, and a rear depth
+    // mass. Their strong overlap makes one coherent body; the saturating sum
+    // below is smooth everywhere and never selects a winning primitive.
+    float sum = 0.0f;
+    sum += cloudUpdraftField(p, glm::vec3(0.00f, -0.21f, 0.02f),
+                            glm::vec3(0.43f, 0.13f, 0.35f), 0.95f);
+    sum += cloudUpdraftField(p, glm::vec3(-0.22f, -0.06f, -0.04f),
+                            glm::vec3(0.22f, 0.34f, 0.24f), 1.45f);
+    sum += cloudUpdraftField(p, glm::vec3(0.00f, -0.02f, 0.07f),
+                            glm::vec3(0.24f, 0.38f, 0.27f), 1.65f);
+    sum += cloudUpdraftField(p, glm::vec3(0.22f, -0.08f, -0.05f),
+                            glm::vec3(0.22f, 0.30f, 0.24f), 1.35f);
+    sum += cloudUpdraftField(p, glm::vec3(-0.02f, -0.10f, -0.20f),
+                            glm::vec3(0.31f, 0.24f, 0.18f), 0.75f);
+
+    float weather =
+        fbm(glm::vec3(p.x * 2.2f, p.z * 1.8f, 9.1f) + seedP * 0.17f, 4);
+    sum *= 0.82f + 0.34f * weather;
+    float mass = 1.0f - expf(-sum);
+
+    // A physically plausible but visibly irregular condensation base. The
+    // broad and detail bands produce approximately 0.4 world units of
+    // variation at the showcase's current Y scale instead of a ruler line.
+    // Keep the condensation-height variation coherent through depth so it
+    // remains visible in projection instead of averaging back into a ruler.
+    float baseLow =
+        fbm(glm::vec3(p.x * 2.7f + seedP.x * 0.23f,
+                      5.3f + seedP.y * 0.17f,
+                      13.1f + seedP.z * 0.11f),
+            3);
+    float baseDetail =
+        fbm(glm::vec3(p.x * 7.1f + seedP.x * 0.31f,
+                      19.7f + seedP.y * 0.13f,
+                      37.3f + seedP.z * 0.07f),
+            3);
+    float baseHeight = -0.31f + 0.09f * (baseLow - 0.5f) +
+                       0.045f * (baseDetail - 0.5f);
+    mass *= glm::smoothstep(baseHeight - 0.055f, baseHeight + 0.055f, p.y);
+
+    // Production-style domain-warped erosion. It grows stronger near
+    // low-density sides and upper levels, tapering the silhouette and opening
+    // internal pockets while preserving a denser core.
+    glm::vec3 q = p * noiseScale + seedP;
+    glm::vec3 detailWarp(valueNoise(q * 0.35f + glm::vec3(13.1f)),
+                         valueNoise(q * 0.35f + glm::vec3(47.7f)),
+                         valueNoise(q * 0.35f + glm::vec3(91.3f)));
+    float billow =
+        billowFbm(q * 0.42f +
+                  0.75f * (detailWarp - glm::vec3(0.5f)));
+    float detail = fbm(q * 1.35f + glm::vec3(17.0f), octaves);
+    float height = glm::clamp((p.y + 0.30f) / 0.70f, 0.0f, 1.0f);
+    float erosionStrength =
+        0.16f + 0.30f * (1.0f - mass) + 0.10f * height;
+    float erosion = erosionStrength * (1.0f - billow) +
+                    0.10f * (1.0f - detail);
+
+    // A separate x/y band is deliberately coherent through depth. Fully 3-D
+    // detail is physically useful inside the cloud but its silhouette
+    // averages smooth along a camera ray; this band preserves multi-scale
+    // cauliflower shoulders after projection without adding solid puffs.
+    float silhouetteLow =
+        fbm(glm::vec3(p.x * 3.6f + seedP.x * 0.19f,
+                      p.y * 3.1f + seedP.y * 0.13f,
+                      41.3f + seedP.z * 0.09f),
+            4);
+    float silhouetteMid =
+        fbm(glm::vec3(p.x * 8.2f + seedP.x * 0.23f,
+                      p.y * 6.5f + seedP.y * 0.11f,
+                      71.7f + seedP.z * 0.07f),
+            4);
+    float silhouette = 0.65f * silhouetteLow + 0.35f * silhouetteMid;
+    float coherentStrength =
+        0.13f + 0.38f * height + 0.32f * (1.0f - mass);
+    float silhouetteGate = glm::smoothstep(0.35f, 0.67f, silhouette);
+    erosion += coherentStrength * (1.0f - silhouetteGate);
+    float field =
+        fmaxf(mass + 0.10f * (weather - 0.5f) - erosion, 0.0f);
+
+    float density = glm::smoothstep(0.05f, 0.48f, field);
+    float internal =
+        0.48f + 0.52f *
+                    glm::smoothstep(0.22f, 0.78f,
+                                    0.65f * billow + 0.35f * detail);
+    return glm::clamp(density * internal, 0.0f, 1.0f);
+}
+
+// Rising-plume profile: a continuous advected column around a wandering axis.
+// Its radius broadens gradually, density dissipates with height, and
+// anisotropic domain-warped noise tears the edge into sheets and wisps. This
+// replaces the former max-union of sixteen swelling spheres.
 __host__ __device__ inline float plumeDensity(const glm::vec3 &pl,
-                                              float noiseScale, int octaves) {
-    float base = 0.0f;
-    for (int k = 0; k < 16; ++k) {
-        float t = (float)k / 15.0f;
-        // Wandering axis + gentle spiral, growing with height.
-        float wx =
-            (fbm(glm::vec3(t * 2.1f + 9.7f, 3.1f, 6.2f), 2) - 0.5f) * 0.55f * t;
-        float wz =
-            (fbm(glm::vec3(t * 2.1f + 41.3f, 8.4f, 2.6f), 2) - 0.5f) * 0.55f *
-            t;
-        float sp = 0.05f + 0.10f * t;
-        float ang = 6.28318f * (noiseHash(k, 21, 5) + 1.6f * t);
-        glm::vec3 c(wx + sp * cosf(ang), -0.5f + 0.88f * powf(t, 0.9f),
-                    wz + sp * sinf(ang));
-        // Puffs swell toward the head, with per-puff size jitter; the floor
-        // keeps consecutive stem puffs overlapping (no gaps in the column).
-        float r = (0.075f + 0.30f * powf(t, 1.4f)) *
-                  (0.8f + 0.4f * noiseHash(k, 9, 33));
-        float cov = 1.0f - glm::length(pl - c) / fmaxf(r, 1e-4f);
-        base = fmaxf(base, cov);
-    }
-    if (base <= 0.0f) {
+                                              float noiseScale, int octaves,
+                                              int seed) {
+    float h = glm::clamp(pl.y + 0.5f, 0.0f, 1.0f);
+    glm::vec3 seedP = noiseSeedOffset(seed);
+
+    float axisNoiseX =
+        fbm(glm::vec3(h * 2.4f, 3.7f, 9.1f) + seedP * 0.21f, 3) - 0.5f;
+    float axisNoiseZ =
+        fbm(glm::vec3(h * 2.2f, 17.3f, 5.9f) + seedP * 0.21f, 3) - 0.5f;
+    glm::vec2 center(
+        (0.025f + 0.24f * h) * sinf(8.5f * h + 5.0f * axisNoiseX) +
+            0.15f * h * axisNoiseX,
+        (0.020f + 0.20f * h) * cosf(7.3f * h + 5.0f * axisNoiseZ) +
+            0.13f * h * axisNoiseZ);
+    glm::vec2 dp(pl.x - center.x, pl.z - center.y);
+
+    // No giant terminal sphere: broadening is gradual, with a modest
+    // turbulent shoulder before the plume dissipates.
+    float shoulder = expf(-90.0f * (h - 0.72f) * (h - 0.72f));
+    float radius = 0.060f + 0.170f * powf(h, 0.72f) + 0.070f * shoulder;
+    float radial = glm::length(dp) / fmaxf(radius, 1e-4f);
+    float envelope = 1.0f - glm::smoothstep(0.30f, 1.14f, radial);
+    if (envelope <= 0.0f) {
         return 0.0f;
     }
-    base = glm::clamp(base * 1.35f, 0.0f, 1.0f);
 
+    // Stretch noise along the rise axis to produce coherent wisps rather than
+    // isotropic bubbles. `octaves` now genuinely controls plume detail.
+    glm::vec3 q(dp.x * noiseScale * 1.35f, h * noiseScale * 0.48f,
+                dp.y * noiseScale * 1.35f);
+    q += seedP;
+    glm::vec3 warp(
+        fbm(q * 0.48f + glm::vec3(7.0f), 3),
+        fbm(q * 0.48f + glm::vec3(23.0f), 3),
+        fbm(q * 0.48f + glm::vec3(41.0f), 3));
+    float detail =
+        fbm(q + 1.25f * (warp - glm::vec3(0.5f)), octaves);
+    float ribbon =
+        0.5f + 0.5f * sinf(11.0f * h + 3.5f * atan2f(dp.y, dp.x) +
+                           2.0f * (detail - 0.5f));
+    float breakup =
+        glm::smoothstep(0.27f + 0.18f * h, 0.72f, detail + 0.12f * ribbon);
+    float d = envelope * (0.36f + 0.64f * breakup);
+
+    // Source fade, upper dissipation, and mild stratified gaps.
+    d *= glm::smoothstep(0.0f, 0.055f, h);
+    d *= 1.0f - glm::smoothstep(0.82f, 1.0f, h);
+    d *= 0.76f + 0.24f * sinf(34.0f * h + 4.0f * detail);
+    return glm::clamp(d, 0.0f, 1.0f);
+}
+
+// Tapered, forked flame tongues. Elongated envelopes provide the macro shape;
+// animated-looking turbulence comes from height-stretched domain warping.
+__host__ __device__ inline float flameDensity(const glm::vec3 &pl,
+                                              float noiseScale, int octaves,
+                                              int seed) {
     float h = glm::clamp(pl.y + 0.5f, 0.0f, 1.0f);
+    glm::vec3 seedP = noiseSeedOffset(seed);
+    float wander = fbm(glm::vec3(h * 3.1f, 7.3f, 13.7f) + seedP * 0.19f, 3) -
+                   0.5f;
+    glm::vec2 center(0.09f * h * sinf(10.0f * h + 4.0f * wander),
+                     0.055f * h * cosf(8.0f * h - 3.0f * wander));
+    glm::vec2 dp(pl.x - center.x, pl.z - center.y);
 
-    // Worley billow + fine detail erosion, stronger with height: the stem
-    // stays near-solid, the head breaks into lobes and wisps.
-    glm::vec3 q = pl * noiseScale;
-    float billow = billowFbm(q * 0.7f);
-    float det = fbm(q * 1.9f + glm::vec3(31.4f), 3);
-    float eroStr = 0.25f + 0.55f * h;
-    float ero = ((1.0f - billow) * 0.8f + (1.0f - det) * 0.2f) * eroStr;
-    float d = (base - ero) / fmaxf(1.0f - ero, 1e-3f);
+    float radius = 0.245f * powf(fmaxf(1.0f - h, 0.0f), 0.68f) + 0.018f;
+    float mainTongue =
+        1.0f - glm::smoothstep(0.38f, 1.05f, glm::length(dp) / radius);
 
-    // Fade in at the very bottom; soft cap so the head never clips the geom.
-    d *= glm::clamp(h / 0.05f, 0.0f, 1.0f);
-    d *= 1.0f - glm::smoothstep(0.85f, 1.0f, h);
+    // Two narrow upper tongues peel away from the core. They are stretched in
+    // height, so even the max composition cannot read as spherical puffs.
+    float forkGate = glm::smoothstep(0.38f, 0.62f, h);
+    float forkRadius = 0.040f + 0.060f * (1.0f - h);
+    glm::vec2 forkA(center.x + 0.12f * forkGate * (h - 0.35f),
+                    center.y - 0.035f * forkGate);
+    glm::vec2 forkB(center.x - 0.10f * forkGate * (h - 0.35f),
+                    center.y + 0.045f * forkGate);
+    float tongueA =
+        (1.0f - glm::smoothstep(0.35f, 1.0f,
+                                glm::length(glm::vec2(pl.x, pl.z) - forkA) /
+                                    forkRadius)) *
+        (1.0f - glm::smoothstep(0.88f, 1.0f, h));
+    float tongueB =
+        (1.0f - glm::smoothstep(0.35f, 1.0f,
+                                glm::length(glm::vec2(pl.x, pl.z) - forkB) /
+                                    forkRadius)) *
+        (1.0f - glm::smoothstep(0.74f, 0.93f, h));
+    float envelope =
+        fmaxf(mainTongue, forkGate * fmaxf(tongueA, tongueB));
+    if (envelope <= 0.0f) {
+        return 0.0f;
+    }
+
+    glm::vec3 q(pl.x * noiseScale * 1.5f, h * noiseScale * 0.52f,
+                pl.z * noiseScale * 1.5f);
+    q += seedP;
+    glm::vec3 warp(
+        fbm(q * 0.55f + glm::vec3(5.1f), 3),
+        fbm(q * 0.55f + glm::vec3(19.7f), 3),
+        fbm(q * 0.55f + glm::vec3(43.3f), 3));
+    float turbulence =
+        fbm(q + 1.35f * (warp - glm::vec3(0.5f)), octaves);
+    float lick = 0.5f + 0.5f * sinf(29.0f * h + 8.0f * turbulence);
+    float d = envelope *
+              glm::smoothstep(0.20f + 0.20f * h, 0.78f,
+                              turbulence + 0.20f * lick + 0.18f * envelope);
+    d *= glm::smoothstep(0.0f, 0.045f, h);
+    d *= 1.0f - glm::smoothstep(0.92f, 1.0f, h);
+    return glm::clamp(d, 0.0f, 1.0f);
+}
+
+// A soft atmospheric bank with denser low layers, broad low-frequency
+// variation, and sparse lifted wisps. The enclosing cube fade in
+// mediumDensity is widened for this profile so its boundary never reads as a
+// glass box.
+__host__ __device__ inline float fogDensity(const glm::vec3 &pl,
+                                            float noiseScale, int octaves,
+                                            int seed) {
+    glm::vec3 seedP = noiseSeedOffset(seed);
+    float h = glm::clamp(pl.y + 0.5f, 0.0f, 1.0f);
+    glm::vec3 q(pl.x * noiseScale, h * noiseScale * 0.30f,
+                pl.z * noiseScale);
+    q += seedP;
+    float broad = fbm(q * 0.42f, min(octaves, 4));
+    float detail = fbm(q * 1.15f + glm::vec3(17.0f), octaves);
+    // Ground fog should dissolve well before the container ceiling.  Leaving
+    // appreciable density until h ~= 1 made even a faded AABB read as a
+    // horizontal slab in back-lit scenes.
+    float height = 1.0f - glm::smoothstep(0.46f, 0.76f, h);
+    float lifted = expf(-45.0f * (h - 0.62f) * (h - 0.62f)) *
+                   glm::smoothstep(0.52f, 0.78f, broad);
+    float d = height * (0.48f + 0.42f * broad + 0.10f * detail) +
+              0.20f * lifted;
     return glm::clamp(d, 0.0f, 1.0f);
 }
 
@@ -251,15 +432,22 @@ __host__ __device__ inline float mediumDensity(const Material &m, const Geom &g,
     float d;
     switch (m.mediumProfile) {
     case MEDIUM_PROFILE_CLOUD:
-        d = cloudDensity(pl, m.noiseScale, m.noiseOctaves);
+        d = cloudDensity(pl, m.noiseScale, m.noiseOctaves, m.noiseSeed);
         break;
     case MEDIUM_PROFILE_PLUME:
-        d = plumeDensity(pl, m.noiseScale, m.noiseOctaves);
+        d = plumeDensity(pl, m.noiseScale, m.noiseOctaves, m.noiseSeed);
+        break;
+    case MEDIUM_PROFILE_FLAME:
+        d = flameDensity(pl, m.noiseScale, m.noiseOctaves, m.noiseSeed);
+        break;
+    case MEDIUM_PROFILE_FOG:
+        d = fogDensity(pl, m.noiseScale, m.noiseOctaves, m.noiseSeed);
         break;
     case MEDIUM_PROFILE_FBM:
     default:
         // Thresholded fbm: carve empty pockets, rescale the rest to [0, 1].
-        d = fbm(pl * m.noiseScale, m.noiseOctaves);
+        d = fbm(pl * m.noiseScale + noiseSeedOffset(m.noiseSeed),
+                m.noiseOctaves);
         d = glm::clamp((d - 0.42f) / 0.33f, 0.0f, 1.0f);
         break;
     }
@@ -270,9 +458,36 @@ __host__ __device__ inline float mediumDensity(const Material &m, const Geom &g,
     } else { // CUBE
         glm::vec3 a = glm::vec3(0.5f) - glm::abs(pl);
         float edge = fminf(a.x, fminf(a.y, a.z));
-        d *= glm::clamp(edge / 0.04f, 0.0f, 1.0f);
+        float edgeWidth = m.mediumProfile == MEDIUM_PROFILE_FOG
+                              ? 0.13f
+                              : (m.mediumProfile == MEDIUM_PROFILE_CLOUD
+                                     ? 0.10f
+                                     : 0.04f);
+        d *= glm::clamp(edge / edgeWidth, 0.0f, 1.0f);
     }
     return d;
+}
+
+// Spatial source strength and relative temperature for continuous medium
+// emission. Fire is hottest at its dense lower core and cooler toward its
+// thin upper/outer tongues. Other emissive profiles simply follow density.
+__host__ __device__ inline void
+mediumEmissionProperties(const Material &m, const Geom &g,
+                         const glm::vec3 &pWorld, float &source,
+                         float &relativeTemperature) {
+    source = mediumDensity(m, g, pWorld);
+    relativeTemperature = 1.0f;
+    if (m.mediumProfile != MEDIUM_PROFILE_FLAME || source <= 0.0f) {
+        return;
+    }
+
+    glm::vec3 pl =
+        multiplyMV(g.transform.inverseTransform, glm::vec4(pWorld, 1.0f));
+    float h = glm::clamp(pl.y + 0.5f, 0.0f, 1.0f);
+    float core = sqrtf(glm::clamp(source, 0.0f, 1.0f));
+    relativeTemperature =
+        glm::clamp(0.58f + 0.42f * core * (1.0f - 0.55f * h), 0.52f, 1.0f);
+    source *= 1.15f - 0.42f * h;
 }
 
 // --- Ray/medium interval ----------------------------------------------------

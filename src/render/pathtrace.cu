@@ -7,6 +7,7 @@
 #include <thrust/random.h>
 
 #include "bxdf.h"
+#include "color.h"
 #include "cudaUtil.h"
 #include "deviceScene.h"
 #include "glm/glm.hpp"
@@ -15,7 +16,7 @@
 #include "sceneStructs.h"
 #include "spectrumData.h"
 #include "utilities.h"
-#include "volume.h"
+#include "volume.h" // Procedural cloud/fog/plume/flame density profiles (v20).
 
 #include <thrust/device_ptr.h>
 #include <thrust/sort.h>
@@ -94,25 +95,32 @@ void checkCUDAErrorFn(const char *msg, const char *file, int line) {
 }
 
 __host__ __device__ thrust::default_random_engine
-makeSeededRandomEngine(int iter, int index, int depth) {
-    int h = utilhash((1 << 31) | (depth << 22) | iter) ^ utilhash(index);
+makeSeededRandomEngine(int iter, int index, int depth, unsigned int domain) {
+    // Hash independent unsigned fields instead of packing signed shifts (which
+    // overflowed for 1<<31 and eventually aliased depth bits). `domain`
+    // separates camera and shade streams even when their numeric depths match.
+    unsigned int h =
+        utilhash((unsigned int)iter ^ (domain * 0x9e3779b9u)) ^
+        utilhash((unsigned int)index * 0x85ebca6bu) ^
+        utilhash((unsigned int)depth * 0xc2b2ae35u);
     return thrust::default_random_engine(h);
 }
 
 // Kernel that writes the image to the OpenGL PBO directly.
 __global__ void sendImageToPBO(uchar4 *pbo, glm::ivec2 resolution, int iter,
-                               glm::vec3 *image) {
+                               glm::vec3 *image, float exposure, int toneMap) {
     int x = (blockIdx.x * blockDim.x) + threadIdx.x;
     int y = (blockIdx.y * blockDim.y) + threadIdx.y;
 
     if (x < resolution.x && y < resolution.y) {
         int index = x + (y * resolution.x);
-        glm::vec3 pix = image[index];
+        glm::vec3 pix =
+            displayTransform(image[index] / (float)iter, exposure, toneMap);
 
         glm::ivec3 color;
-        color.x = glm::clamp((int)(pix.x / iter * 255.0), 0, 255);
-        color.y = glm::clamp((int)(pix.y / iter * 255.0), 0, 255);
-        color.z = glm::clamp((int)(pix.z / iter * 255.0), 0, 255);
+        color.x = glm::clamp((int)(pix.x * 255.0f), 0, 255);
+        color.y = glm::clamp((int)(pix.y * 255.0f), 0, 255);
+        color.z = glm::clamp((int)(pix.z * 255.0f), 0, 255);
 
         // Each thread writes one pixel location in the texture (textel)
         pbo[index].w = 0;
@@ -155,7 +163,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth,
     int index = x + (y * cam.resolution.x);
 
     thrust::default_random_engine rng =
-        makeSeededRandomEngine(iter, index, traceDepth);
+        makeSeededRandomEngine(iter, index, traceDepth, 0x43414d45u);
     thrust::uniform_real_distribution<float> u01(0, 1);
 
     PathSegment &segment = pathSegments[index];
@@ -219,6 +227,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth,
     // viewed env/emitters are added at full weight (no MIS discount).
     segment.bsdfPdf = 0.0f;
     segment.specularBounce = true;
+    segment.lastVertexDistance = 0.0f;
     segment.eta = 1.0f;
     // Camera starts in vacuum (a camera inside a medium is unsupported).
     segment.mediumGeom = -1;
@@ -1060,7 +1069,8 @@ __global__ void shade(int iter, int depth, int num_paths,
         return;
     }
 
-    thrust::default_random_engine rng = makeSeededRandomEngine(iter, idx, depth);
+    thrust::default_random_engine rng = makeSeededRandomEngine(
+        iter, pathSegment.pixelIndex, depth, 0x53484144u);
     thrust::uniform_real_distribution<float> u01(0, 1);
 
     // --- Participating medium: march the segment up to the hit point ---
@@ -1081,6 +1091,48 @@ __global__ void shade(int iter, int depth, int num_paths,
             upliftSigma(mm.sigmaS, pathSegment.swl) * mm.densityScale;
         Spectrum sigT = sigA + sigS;
 
+        // Estimate the emitted-radiance term independently over the complete
+        // segment to the next boundary/surface:
+        //   integral T(0,s) * j(s) ds.
+        // This mirrors the volume rendering equation directly. Homogeneous
+        // transmittance is analytic; heterogeneous transmittance is estimated
+        // with ratio tracking. Keeping every carried wavelength makes the
+        // estimator compatible with both packet-balance free-flight weights
+        // and paths whose secondary wavelengths were terminated by dispersion.
+        if (mm.emittance > 0.0f && intersection.t > 0.0f) {
+            constexpr int emissionSamples = 4;
+            Spectrum emissionIntegral(0.0f);
+            for (int es = 0; es < emissionSamples; ++es) {
+                float te =
+                    ((float)es + u01(rng)) *
+                    (intersection.t / emissionSamples);
+                glm::vec3 emissionP =
+                    pathSegment.ray.origin + te * pathSegment.ray.direction;
+                float source, relativeTemperature;
+                mediumEmissionProperties(mm, mg, emissionP, source,
+                                         relativeTemperature);
+                if (source <= 0.0f) {
+                    continue;
+                }
+                float temperature = mm.blackbodyTemp;
+                if (mm.spectrumType == SPECTRUM_BLACKBODY) {
+                    temperature *= relativeTemperature;
+                }
+                Spectrum Le = upliftIlluminant(
+                    mm.color * mm.emittance, pathSegment.swl, mm.spectrumType,
+                    temperature, mm.blackbodyNorm);
+                Spectrum Tr =
+                    mm.heterogeneous
+                        ? mediumTransmittance(mg, mm, sigT, pathSegment.ray,
+                                              0.0f, te, rng)
+                        : glm::exp(-sigT * te);
+                emissionIntegral += Tr * Le * source;
+            }
+            pathSegment.radiance +=
+                pathSegment.color * emissionIntegral *
+                (intersection.t / (float)emissionSamples);
+        }
+
         MediumSample msamp =
             mm.heterogeneous
                 ? sampleMediumHeterogeneous(mg, mm, sigT, sigS,
@@ -1088,6 +1140,7 @@ __global__ void shade(int iter, int depth, int num_paths,
                                             rng)
                 : sampleMediumHomogeneous(sigT, sigS, intersection.t,
                                           u01(rng));
+
         pathSegment.color *= msamp.weight;
         if (msamp.scattered) {
             glm::vec3 scatterP =
@@ -1107,6 +1160,7 @@ __global__ void shade(int iter, int depth, int num_paths,
             pathSegment.ray.direction = ps.wiW;
             pathSegment.bsdfPdf = ps.pdf;
             pathSegment.specularBounce = false;
+            pathSegment.lastVertexDistance = 0.0f;
             // mediumGeom unchanged: the path is still inside the medium.
 
 #if (USE_RUSSIAN_ROULETTE)
@@ -1134,6 +1188,7 @@ __global__ void shade(int iter, int depth, int num_paths,
     if (material.type == MatType::MEDIUM) {
         bool entering = pathSegment.mediumGeom != intersection.hitGeomIndex;
         pathSegment.mediumGeom = entering ? intersection.hitGeomIndex : -1;
+        pathSegment.lastVertexDistance += intersection.t + 2e-3f;
         pathSegment.ray.origin =
             getPointOnRay(pathSegment.ray, intersection.t) +
             pathSegment.ray.direction * 2e-3f;
@@ -1203,7 +1258,9 @@ __global__ void shade(int iter, int depth, int num_paths,
             if (area > 0.0f && cosL > 0.0f) {
                 // Solid-angle light pdf for this hit, incl. 1/numLights uniform
                 // light selection -- matches the NEE sampler below.
-                float lightPdf = (intersection.t * intersection.t) /
+                float fullDistance =
+                    pathSegment.lastVertexDistance + intersection.t;
+                float lightPdf = (fullDistance * fullDistance) /
                                  (area * cosL * (float)numLights);
                 weight = powerHeuristic(pathSegment.bsdfPdf, lightPdf);
             }
@@ -1295,6 +1352,7 @@ __global__ void shade(int iter, int depth, int num_paths,
         // or along wiW does not, which is what produced the dark edge.
         glm::vec3 offsetNormal = glm::dot(wiW, Ng) < 0.0f ? -Ng : Ng;
         pathSegment.ray.origin = oldIntersect + offsetNormal * 1e-3f;
+        pathSegment.lastVertexDistance = 0.0f;
         pathSegment.color *= bs.weight;
 
 // TODO: is it worth it?
@@ -1437,6 +1495,11 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
     // --- PathSegment Tracing Stage ---
     // Shoot ray into scene, bounce between objects, push shading chunks
     bool iterationComplete = false;
+    // remainingBounces, decremented only at real surface/medium vertices, is
+    // the actual path-depth budget. This separate generous cap only guards
+    // against a numerical loop repeatedly hitting the same null boundary.
+    const int maxTraversalSteps =
+        traceDepth * (2 * (int)hst_scene->geoms.size() + 2) + 8;
     while (!iterationComplete) {
         // clean shading chunks
         cudaMemset(dev.intersections, 0,
@@ -1473,11 +1536,17 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
         partitionRays(num_paths, dev.paths, dev.intersections);
 #endif
 
-        iterationComplete = (depth >= traceDepth) || (num_paths == 0);
+        iterationComplete = (num_paths == 0) || (depth >= maxTraversalSteps);
 
         if (guiData != NULL) {
             guiData->TracedDepth = depth;
         }
+    }
+    if (num_paths > 0 && depth >= maxTraversalSteps) {
+        fprintf(stderr,
+                "WARNING: null-interface safety cap reached with %d live "
+                "paths; check medium boundaries for numerical loops.\n",
+                num_paths);
     }
 
     // Assemble this iteration and apply it to the image
@@ -1490,8 +1559,10 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
     // Send results to OpenGL buffer for rendering
     // Note this is not ping pong buffers! It's doing classic path tracer where
     // the results get average after each loop.
-    sendImageToPBO<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, iter,
-                                                     dev.image);
+    if (pbo != nullptr) {
+        sendImageToPBO<<<blocksPerGrid2d, blockSize2d>>>(
+            pbo, cam.resolution, iter, dev.image, cam.exposure, cam.toneMap);
+    }
 
     // Retrieve image from GPU
     cudaMemcpy(hst_scene->state.image.data(), dev.image,

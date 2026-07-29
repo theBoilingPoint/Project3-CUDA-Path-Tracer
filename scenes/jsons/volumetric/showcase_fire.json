@@ -1,0 +1,88 @@
+{
+  "Materials": {
+    "ground": {
+      "TYPE": "Diffuse",
+      "RGB": [0.07, 0.055, 0.045]
+    },
+    "backdrop": {
+      "TYPE": "Diffuse",
+      "RGB": [0.018, 0.022, 0.032]
+    },
+    "ember": {
+      "TYPE": "Diffuse",
+      "RGB": [0.06, 0.02, 0.005]
+    },
+    "fire": {
+      "TYPE": "Medium",
+      "SIGMA_A": [0.14, 0.18, 0.26],
+      "SIGMA_S": [0.020, 0.024, 0.030],
+      "G": 0.05,
+      "DENSITY": 0.85,
+      "HETEROGENEOUS": true,
+      "PROFILE": "Flame",
+      "NOISE_SCALE": 6.0,
+      "NOISE_OCTAVES": 5,
+      "NOISE_SEED": 47,
+      "EMISSION": 15.0,
+      "EMISSION_RGB": [1.0, 1.0, 1.0],
+      "SPECTRUM": {"BLACKBODY": 2350.0}
+    }
+  },
+  "Lights": [
+    {
+      "TYPE": "Point",
+      "POSITION": [0.0, 1.15, 0.6],
+      "RGB": [1.0, 0.30, 0.055],
+      "SPECTRUM": {"BLACKBODY": 2200.0},
+      "INTENSITY": 75.0
+    },
+    {
+      "TYPE": "Point",
+      "POSITION": [-3.5, 5.0, -2.0],
+      "RGB": [0.24, 0.36, 0.62],
+      "INTENSITY": 18.0
+    }
+  ],
+  "Camera": {
+    "RES": [800, 450],
+    "FOVY": 35.0,
+    "ITERATIONS": 1024,
+    "DEPTH": 24,
+    "FILE": "showcase_fire",
+    "EXPOSURE": -1.25,
+    "TONEMAP": true,
+    "EYE": [0.0, 2.1, 10.5],
+    "LOOKAT": [0.0, 2.0, 0.0],
+    "UP": [0.0, 1.0, 0.0]
+  },
+  "Objects": [
+    {
+      "TYPE": "cube",
+      "MATERIAL": "ground",
+      "TRANS": [0.0, -0.12, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [16.0, 0.2, 16.0]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "backdrop",
+      "TRANS": [0.0, 3.0, -3.2],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [20.0, 10.0, 0.2]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "ember",
+      "TRANS": [0.0, 0.24, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [1.2, 0.48, 1.2]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "fire",
+      "TRANS": [0.0, 2.0, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [3.0, 4.0, 3.0]
+    }
+  ]
+}

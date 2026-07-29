@@ -181,14 +181,21 @@ struct Material {
     int heterogeneous;  // 1: procedural density in [0,1] modulates sigma
     float noiseScale;   // noise frequency, in units of the geom's local space
     int noiseOctaves;   // fbm octave count
+    int noiseSeed;      // deterministic offset for procedural density variation
     int mediumProfile;  // MediumProfile: shape of the procedural density field
+
+    // Emissive media (fire): `color * emittance` is emitted radiance per unit
+    // distance at peak procedural density. spectrumType/blackbody fields above
+    // select the spectral shape, exactly as for surface emitters.
 };
 
 // Procedural density-field shapes for heterogeneous media (JSON "PROFILE").
 enum MediumProfile {
     MEDIUM_PROFILE_FBM = 0, // plain thresholded fbm filling the geom
-    MEDIUM_PROFILE_CLOUD,   // cumulus: puff-cluster mass + warped erosion
-    MEDIUM_PROFILE_PLUME,   // rising smoke column: cone + twist + break-up
+    MEDIUM_PROFILE_CLOUD,   // connected cumulus mass + turbulent erosion
+    MEDIUM_PROFILE_PLUME,   // continuous rising smoke column + wispy breakup
+    MEDIUM_PROFILE_FLAME,   // tapered, forked, emissive flame tongues
+    MEDIUM_PROFILE_FOG,     // low-frequency, height-varying atmospheric bank
 };
 
 /****** For Texture Loading ******/
@@ -262,6 +269,8 @@ struct Camera {
     glm::vec2 pixelLength;
     float lensRadius;
     float focalDistance;
+    float exposure; // photographic exposure in stops (EV)
+    int toneMap;    // 1: ACES fitted curve + linear-to-sRGB output transform
 };
 
 struct RenderState {
@@ -291,6 +300,10 @@ struct PathSegment {
     // specular/delta event (env seen through it gets full weight, no NEE).
     float bsdfPdf;
     bool specularBounce;
+    // Distance traveled since the last real surface/medium vertex. Null
+    // medium boundaries reset the ray origin for robustness, so this preserves
+    // the full vertex-to-emitter distance needed by area-light MIS.
+    float lastVertexDistance;
     float eta; // Used for Russian roulette to determine how likely this ray
                // survives
     // Index of the geom whose interior medium the ray currently travels
