@@ -1,0 +1,128 @@
+{
+  "Materials": {
+    "gas_1000k": {
+      "TYPE": "Medium",
+      "SIGMA_A": [0.08, 0.08, 0.08],
+      "SIGMA_S": [0.0, 0.0, 0.0],
+      "DENSITY": 1.0,
+      "HETEROGENEOUS": false,
+      "EMISSION": 0.08,
+      "EMISSION_RGB": [1.0, 1.0, 1.0],
+      "SPECTRUM": {"BLACKBODY": 1000.0}
+    },
+    "gas_1400k": {
+      "TYPE": "Medium",
+      "SIGMA_A": [0.08, 0.08, 0.08],
+      "SIGMA_S": [0.0, 0.0, 0.0],
+      "DENSITY": 1.0,
+      "HETEROGENEOUS": false,
+      "EMISSION": 0.20,
+      "EMISSION_RGB": [1.0, 1.0, 1.0],
+      "SPECTRUM": {"BLACKBODY": 1400.0}
+    },
+    "gas_1800k": {
+      "TYPE": "Medium",
+      "SIGMA_A": [0.08, 0.08, 0.08],
+      "SIGMA_S": [0.0, 0.0, 0.0],
+      "DENSITY": 1.0,
+      "HETEROGENEOUS": false,
+      "EMISSION": 0.45,
+      "EMISSION_RGB": [1.0, 1.0, 1.0],
+      "SPECTRUM": {"BLACKBODY": 1800.0}
+    },
+    "gas_2200k": {
+      "TYPE": "Medium",
+      "SIGMA_A": [0.08, 0.08, 0.08],
+      "SIGMA_S": [0.0, 0.0, 0.0],
+      "DENSITY": 1.0,
+      "HETEROGENEOUS": false,
+      "EMISSION": 0.85,
+      "EMISSION_RGB": [1.0, 1.0, 1.0],
+      "SPECTRUM": {"BLACKBODY": 2200.0}
+    },
+    "gas_2800k": {
+      "TYPE": "Medium",
+      "SIGMA_A": [0.08, 0.08, 0.08],
+      "SIGMA_S": [0.0, 0.0, 0.0],
+      "DENSITY": 1.0,
+      "HETEROGENEOUS": false,
+      "EMISSION": 1.60,
+      "EMISSION_RGB": [1.0, 1.0, 1.0],
+      "SPECTRUM": {"BLACKBODY": 2800.0}
+    },
+    "gas_3500k": {
+      "TYPE": "Medium",
+      "SIGMA_A": [0.08, 0.08, 0.08],
+      "SIGMA_S": [0.0, 0.0, 0.0],
+      "DENSITY": 1.0,
+      "HETEROGENEOUS": false,
+      "EMISSION": 2.80,
+      "EMISSION_RGB": [1.0, 1.0, 1.0],
+      "SPECTRUM": {"BLACKBODY": 3500.0}
+    }
+  },
+  "Textures": {},
+  "Integrator": {
+    "VOLUME_QUALITY": "Reference",
+    "VOLUME_DEBUG": "None",
+    "VOLUME_MAX_SCATTER_DEPTH": 4,
+    "VOLUME_STATS": false
+  },
+  "Lights": [],
+  "Camera": {
+    "RES": [640, 240],
+    "FOVY": 25.0,
+    "ITERATIONS": 32,
+    "DEPTH": 8,
+    "FILE": "blackbody_temperature_ramp",
+    "EXPOSURE": -1.5,
+    "TONEMAP": true,
+    "EYE": [0.0, 0.4, 11.0],
+    "LOOKAT": [0.0, 0.0, 0.0],
+    "UP": [0.0, 1.0, 0.0]
+  },
+  "Objects": [
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "gas_1000k",
+      "TRANS": [-3.75, 0.0, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [1.15, 1.15, 1.15]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "gas_1400k",
+      "TRANS": [-2.25, 0.0, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [1.15, 1.15, 1.15]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "gas_1800k",
+      "TRANS": [-0.75, 0.0, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [1.15, 1.15, 1.15]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "gas_2200k",
+      "TRANS": [0.75, 0.0, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [1.15, 1.15, 1.15]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "gas_2800k",
+      "TRANS": [2.25, 0.0, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [1.15, 1.15, 1.15]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "gas_3500k",
+      "TRANS": [3.75, 0.0, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [1.15, 1.15, 1.15]
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 #include "deviceScene.h"
 
+#include <algorithm>
 #include <tuple>
 #include <vector>
 
@@ -209,6 +210,198 @@ static void initialiseEnvironmentMap(DeviceScene &ds, Scene *scene) {
     checkCUDAError("Environment Map Initialisation");
 }
 
+template <typename T>
+static void uploadVector(const std::vector<T> &host, T *&device) {
+    device = nullptr;
+    if (host.empty()) {
+        return;
+    }
+    cudaMalloc(&device, host.size() * sizeof(T));
+    cudaMemcpy(device, host.data(), host.size() * sizeof(T),
+               cudaMemcpyHostToDevice);
+}
+
+// Mitsuba's CUDA grid-volume path uses a hardware 3-D texture for trilinear
+// field lookup. Keep our sparse page table and conservative brick majorants,
+// but pack the active 9^3 brick payloads into a small 3-D atlas and use the
+// same GPU filtering principle. Bricks never share interpolation samples:
+// each owns its positive halo, so filtering cannot bleed between atlas tiles.
+static glm::ivec3 volumeTextureBrickResolution(int brickCount) {
+    if (brickCount <= 0) {
+        return glm::ivec3(0);
+    }
+    const int x = std::min(brickCount, 16);
+    const int y = std::min((brickCount + x - 1) / x, 16);
+    const int z = (brickCount + x * y - 1) / (x * y);
+    return glm::ivec3(x, y, z);
+}
+
+static cudaTextureObject_t createVolumeFieldTexture(
+    const HostSparseVolumeGrid &grid, const std::vector<glm::vec4> &samples,
+    const glm::ivec3 &atlasBricks, cudaArray_t &array) {
+    array = nullptr;
+    if (grid.bricks.empty() || samples.empty()) {
+        return 0;
+    }
+    static_assert(sizeof(glm::vec4) == sizeof(float4),
+                  "volume float4 atlas requires packed glm::vec4");
+
+    const glm::ivec3 atlasSamples =
+        atlasBricks * kVolumeBrickSampleSize;
+    const std::size_t atlasSampleCount =
+        static_cast<std::size_t>(atlasSamples.x) * atlasSamples.y *
+        atlasSamples.z;
+    std::vector<glm::vec4> atlas(atlasSampleCount, glm::vec4(0.0f));
+
+    for (int brickIndex = 0;
+         brickIndex < static_cast<int>(grid.bricks.size()); ++brickIndex) {
+        const int bx = brickIndex % atlasBricks.x;
+        const int by = (brickIndex / atlasBricks.x) % atlasBricks.y;
+        const int bz = brickIndex / (atlasBricks.x * atlasBricks.y);
+        const std::size_t sourceBase = grid.bricks[brickIndex].sampleOffset;
+        for (int z = 0; z < kVolumeBrickSampleSize; ++z) {
+            for (int y = 0; y < kVolumeBrickSampleSize; ++y) {
+                for (int x = 0; x < kVolumeBrickSampleSize; ++x) {
+                    const std::size_t source =
+                        sourceBase + x + kVolumeBrickSampleSize *
+                                           (y + kVolumeBrickSampleSize * z);
+                    const int ax = bx * kVolumeBrickSampleSize + x;
+                    const int ay = by * kVolumeBrickSampleSize + y;
+                    const int az = bz * kVolumeBrickSampleSize + z;
+                    const std::size_t destination =
+                        ax + static_cast<std::size_t>(atlasSamples.x) *
+                                 (ay + static_cast<std::size_t>(atlasSamples.y) *
+                                           az);
+                    atlas[destination] = samples[source];
+                }
+            }
+        }
+    }
+
+    const cudaChannelFormatDesc channel = cudaCreateChannelDesc<float4>();
+    const cudaExtent extent = make_cudaExtent(
+        atlasSamples.x, atlasSamples.y, atlasSamples.z);
+    cudaMalloc3DArray(&array, &channel, extent);
+
+    cudaMemcpy3DParms copy{};
+    copy.srcPtr = make_cudaPitchedPtr(
+        atlas.data(), static_cast<std::size_t>(atlasSamples.x) *
+                          sizeof(glm::vec4),
+        static_cast<std::size_t>(atlasSamples.x) * sizeof(glm::vec4),
+        atlasSamples.y);
+    copy.dstArray = array;
+    copy.extent = extent;
+    copy.kind = cudaMemcpyHostToDevice;
+    cudaMemcpy3D(&copy);
+
+    cudaResourceDesc resource{};
+    resource.resType = cudaResourceTypeArray;
+    resource.res.array.array = array;
+
+    cudaTextureDesc texture{};
+    texture.addressMode[0] = cudaAddressModeClamp;
+    texture.addressMode[1] = cudaAddressModeClamp;
+    texture.addressMode[2] = cudaAddressModeClamp;
+    texture.filterMode = cudaFilterModeLinear;
+    texture.readMode = cudaReadModeElementType;
+    texture.normalizedCoords = 0;
+
+    cudaTextureObject_t object = 0;
+    cudaCreateTextureObject(&object, &resource, &texture, nullptr);
+    return object;
+}
+
+// Upload every compact brick grid, then patch the corresponding read-only
+// device views into the enclosing host Geom records before `geoms` itself is
+// copied. The host vectors remain alive so interactive camera resets can
+// rebuild all device allocations safely.
+static void initialiseVolumeGrids(DeviceScene &ds, Scene *scene) {
+    ds.volumeGridResources.clear();
+    ds.volumeGridResources.resize(scene->volumeGrids.size());
+    std::vector<SparseVolumeGridDevice> views(scene->volumeGrids.size());
+
+    for (size_t i = 0; i < scene->volumeGrids.size(); ++i) {
+        const HostSparseVolumeGrid &host = scene->volumeGrids[i];
+        VolumeGridResource &resource = ds.volumeGridResources[i];
+        uploadVector(host.pageTable, resource.pageTable);
+        uploadVector(host.brickEmissionCdf, resource.brickEmissionCdf);
+        uploadVector(host.cellEmissionCdf, resource.cellEmissionCdf);
+
+        const glm::ivec3 atlasBricks = volumeTextureBrickResolution(
+            static_cast<int>(host.bricks.size()));
+        std::vector<VolumeBrickMeta> deviceBricks = host.bricks;
+        for (int brickIndex = 0;
+             brickIndex < static_cast<int>(deviceBricks.size());
+             ++brickIndex) {
+            const int bx = brickIndex % atlasBricks.x;
+            const int by = (brickIndex / atlasBricks.x) % atlasBricks.y;
+            const int bz = brickIndex /
+                           (atlasBricks.x * atlasBricks.y);
+            deviceBricks[brickIndex].textureBaseX =
+                bx * kVolumeBrickSampleSize;
+            deviceBricks[brickIndex].textureBaseY =
+                by * kVolumeBrickSampleSize;
+            deviceBricks[brickIndex].textureBaseZ =
+                bz * kVolumeBrickSampleSize;
+        }
+        uploadVector(deviceBricks, resource.bricks);
+        resource.combustionTexture = createVolumeFieldTexture(
+            host, host.combustionSamples, atlasBricks,
+            resource.combustionArray);
+        resource.thermalFlowTexture = createVolumeFieldTexture(
+            host, host.thermalFlowSamples, atlasBricks,
+            resource.thermalFlowArray);
+
+        SparseVolumeGridDevice view{};
+        view.valid = 1;
+        view.cellResolution = host.cellResolution;
+        view.brickResolution = host.brickResolution;
+        view.activeBrickCount = static_cast<int>(host.bricks.size());
+        view.localBoundsMin = host.localBoundsMin;
+        view.localBoundsMax = host.localBoundsMax;
+        view.brickSize = host.brickSize;
+        view.cellVolume = host.cellVolume;
+        view.totalEmissionPower = host.totalEmissionPower;
+        view.localToWorldVolume = 1.0f; // patched per transformed geom below
+        view.pageTable = resource.pageTable;
+        view.bricks = resource.bricks;
+        view.textureBrickResolution = atlasBricks;
+        view.combustionTexture = resource.combustionTexture;
+        view.thermalFlowTexture = resource.thermalFlowTexture;
+        view.combustionSamples = nullptr;
+        view.thermalFlowSamples = nullptr;
+        view.brickEmissionCdf = resource.brickEmissionCdf;
+        view.cellEmissionCdf = resource.cellEmissionCdf;
+        views[i] = view;
+    }
+
+    for (Geom &geom : scene->geoms) {
+        if (geom.volumeGridId < 0) {
+            geom.volumeGrid = SparseVolumeGridDevice{};
+            continue;
+        }
+        if (geom.volumeGridId >= static_cast<int>(views.size())) {
+            fprintf(stderr, "Invalid Geom volumeGridId %d.\n",
+                    geom.volumeGridId);
+            exit(EXIT_FAILURE);
+        }
+        geom.volumeGrid = views[geom.volumeGridId];
+        geom.volumeGrid.localToWorldVolume =
+            fabsf(glm::determinant(glm::mat3(geom.transform.transform)));
+    }
+
+    ds.volumeTrackingStats = nullptr;
+    // Keep instrumentation completely opt-in. A null device pointer is also
+    // the device-side fast path: recordVolumeTrackingStats returns before any
+    // global atomics when VOLUME_STATS is disabled.
+    if (!scene->volumeGrids.empty() &&
+        scene->volumeIntegrator.reportTrackingStats != 0) {
+        cudaMalloc(&ds.volumeTrackingStats, sizeof(VolumeTrackingStats));
+        cudaMemset(ds.volumeTrackingStats, 0, sizeof(VolumeTrackingStats));
+    }
+    checkCUDAError("Sparse volume grid upload");
+}
+
 void deviceSceneInit(DeviceScene &ds, Scene *scene) {
     const Camera &cam = scene->state.camera;
     const int pixelcount = cam.resolution.x * cam.resolution.y;
@@ -222,6 +415,7 @@ void deviceSceneInit(DeviceScene &ds, Scene *scene) {
     initialiseTriangles(
         ds.geomTriangles, ds.geomBVHNodes, scene->geoms, scene->geomMeshData,
         totalNumberOfGeom); // Must appear before initializing ds.geoms
+    initialiseVolumeGrids(ds, scene);
     cudaMalloc(&ds.geoms, totalNumberOfGeom * sizeof(Geom));
     cudaMemcpy(ds.geoms, scene->geoms.data(),
                scene->geoms.size() * sizeof(Geom), cudaMemcpyHostToDevice);
@@ -234,6 +428,7 @@ void deviceSceneInit(DeviceScene &ds, Scene *scene) {
     cudaMalloc(&ds.lights, totalNumberOfLights * sizeof(Geom));
     cudaMemcpy(ds.lights, scene->lights.data(),
                scene->lights.size() * sizeof(Geom), cudaMemcpyHostToDevice);
+    uploadVector(scene->areaLightCdf, ds.areaLightCdf);
     cudaMalloc(&ds.totalNumberOfLights, sizeof(int));
     cudaMemcpy(ds.totalNumberOfLights, &totalNumberOfLights, sizeof(int),
                cudaMemcpyHostToDevice);
@@ -291,16 +486,30 @@ static void freeTextureResources(DeviceScene &ds) {
 }
 
 void deviceSceneFree(DeviceScene &ds) {
+    if (ds.volumeTrackingStats != nullptr) {
+        VolumeTrackingStats stats{};
+        cudaMemcpy(&stats, ds.volumeTrackingStats, sizeof(stats),
+                   cudaMemcpyDeviceToHost);
+        printf("Volume tracking: %llu brick visits, %llu empty skips, "
+               "%llu null, %llu real, %llu majorant violations, "
+               "%llu overflows\n",
+               stats.brickVisits, stats.emptyBrickSkips,
+               stats.nullCollisions, stats.realCollisions,
+               stats.majorantViolations, stats.trackingOverflows);
+    }
     cudaFree(ds.image); // no-op if null
     cudaFree(ds.paths);
     cudaFree(ds.geoms);
     cudaFree(ds.lights);
+    cudaFree(ds.areaLightCdf);
     cudaFree(ds.geomTriangles);
     cudaFree(ds.lightTriangles);
     cudaFree(ds.geomBVHNodes);
     cudaFree(ds.lightBVHNodes);
     cudaFree(ds.totalNumberOfLights);
     cudaFree(ds.deltaLights); // no-op if null
+    cudaFree(ds.volumeTrackingStats);
+    ds.volumeTrackingStats = nullptr;
     cudaFree(ds.materials);
     cudaFree(ds.intersections);
 
@@ -316,6 +525,26 @@ void deviceSceneFree(DeviceScene &ds) {
     cudaFree((void *)ds.envMap.marginalCdf);
     ds.envMap.conditionalCdf = nullptr;
     ds.envMap.marginalCdf = nullptr;
+
+    for (VolumeGridResource &resource : ds.volumeGridResources) {
+        cudaFree(resource.pageTable);
+        cudaFree(resource.bricks);
+        if (resource.combustionTexture != 0) {
+            cudaDestroyTextureObject(resource.combustionTexture);
+        }
+        if (resource.thermalFlowTexture != 0) {
+            cudaDestroyTextureObject(resource.thermalFlowTexture);
+        }
+        if (resource.combustionArray != nullptr) {
+            cudaFreeArray(resource.combustionArray);
+        }
+        if (resource.thermalFlowArray != nullptr) {
+            cudaFreeArray(resource.thermalFlowArray);
+        }
+        cudaFree(resource.brickEmissionCdf);
+        cudaFree(resource.cellEmissionCdf);
+    }
+    ds.volumeGridResources.clear();
 
 #if SPECTRAL
     freeSpectralTables();

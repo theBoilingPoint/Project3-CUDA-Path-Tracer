@@ -16,7 +16,7 @@
 #include "sceneStructs.h"
 #include "spectrumData.h"
 #include "utilities.h"
-#include "volume.h" // Procedural cloud/fog/plume/flame density profiles (v20).
+#include "volume.h" // Procedural atmospheric/combustion density profiles (v47).
 
 #include <thrust/device_ptr.h>
 #include <thrust/sort.h>
@@ -231,6 +231,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth,
     segment.eta = 1.0f;
     // Camera starts in vacuum (a camera inside a medium is unsupported).
     segment.mediumGeom = -1;
+    segment.volumeScatteringDepth = 0;
 }
 
 // computeIntersections handles generating ray intersections ONLY.
@@ -520,64 +521,59 @@ __device__ bool anyHit(const Ray &ray, Geom *geoms, int geoms_size,
     return false;
 }
 
-// World-space surface area of an emitter geom, from the linear part of its
-// transform. Supports analytic cube and sphere emitters, and triangle meshes
-// (summed per-triangle world area). Returns 0 for anything else.
-//
-// NOTE: the mesh case is O(numTriangles) and is evaluated per light sample /
-// per emitter hit. That is fine for the low-poly emitters these scenes use; a
-// large mesh light would want a precomputed area (and triangle-area CDF)
-// uploaded once, like the environment distribution.
+// Host-precomputed world-space surface area. Cube and mesh values are exact;
+// an affine sphere stores a close total-area proxy used only to build the
+// discrete emitted-power distribution. Its conditional point PDF below uses
+// the exact local-to-world area Jacobian, so NEE and hit-light MIS agree.
 __device__ float lightGeomArea(const Geom &g) {
-    glm::vec3 ex =
-        glm::vec3(g.transform.transform[0]); // local +X edge in world
-    glm::vec3 ey = glm::vec3(g.transform.transform[1]);
-    glm::vec3 ez = glm::vec3(g.transform.transform[2]);
-    if (g.type == CUBE) {
-        // Unit cube [-0.5,0.5]^3: full edge vectors are ex/ey/ez, so opposite
-        // face pairs give 2*(|ey x ez| + |ex x ez| + |ex x ey|).
-        return 2.0f * (glm::length(glm::cross(ey, ez)) +
-                       glm::length(glm::cross(ex, ez)) +
-                       glm::length(glm::cross(ex, ey)));
-    } else if (g.type == SPHERE) {
-        // Local radius 0.5; assumes ~uniform scale (world radius 0.5*|ex|).
-        float r = 0.5f * glm::length(ex);
-        return 4.0f * M_PIf * r * r;
-    } else if (g.type == MESH) {
-        const Triangle *tris = g.geometry.devTriangles;
-        int n = g.geometry.numTriangles;
-        float area = 0.0f;
-        for (int i = 0; i < n; ++i) {
-            glm::vec3 p0 = multiplyMV(g.transform.transform,
-                                      glm::vec4(tris[i].points[0], 1.0f));
-            glm::vec3 p1 = multiplyMV(g.transform.transform,
-                                      glm::vec4(tris[i].points[1], 1.0f));
-            glm::vec3 p2 = multiplyMV(g.transform.transform,
-                                      glm::vec4(tris[i].points[2], 1.0f));
-            area += 0.5f * glm::length(glm::cross(p1 - p0, p2 - p0));
-        }
-        return area;
-    }
-    return 0.0f;
+    return g.surfaceArea;
 }
 
-// Sample a world-space point + outward world normal uniformly on an emitter's
-// surface. Outputs the area-measure pdf (1/area); 0 for unsupported geoms.
+// Differential area scale for an affine transform M applied to a local
+// sphere: dA_world = |det(M)| |M^-T n_local| dA_local.
+__device__ float affineSphereAreaJacobian(const Geom &g,
+                                          const glm::vec3 &nLocal) {
+    const glm::vec3 ex = glm::vec3(g.transform.transform[0]);
+    const glm::vec3 ey = glm::vec3(g.transform.transform[1]);
+    const glm::vec3 ez = glm::vec3(g.transform.transform[2]);
+    const float determinant = fabsf(glm::dot(ex, glm::cross(ey, ez)));
+    const glm::vec3 inverseTransposeNormal = multiplyMV(
+        g.transform.invTranspose, glm::vec4(nLocal, 0.0f));
+    return determinant * glm::length(inverseTransposeNormal);
+}
+
+__device__ float lightGeomPdfAreaAtPoint(const Geom &g,
+                                         const glm::vec3 &pWorld) {
+    if (g.type == SPHERE) {
+        const glm::vec3 pLocal = multiplyMV(
+            g.transform.inverseTransform, glm::vec4(pWorld, 1.0f));
+        const glm::vec3 nLocal = glm::normalize(pLocal);
+        const float jacobian = affineSphereAreaJacobian(g, nLocal);
+        // The canonical sphere radius is 0.5, so its local area is pi.
+        return jacobian > 0.0f ? 1.0f / (M_PIf * jacobian) : 0.0f;
+    }
+    const float area = lightGeomArea(g);
+    return area > 0.0f ? 1.0f / area : 0.0f;
+}
+
+// Sample a world-space point + outward world normal on an emitter. Cubes and
+// meshes are uniform in world-area measure. Affine spheres are uniform on the
+// canonical sphere and report the corresponding nonuniform world-area PDF.
+// Outputs zero for unsupported or degenerate geometry.
 __device__ void sampleLightGeom(const Geom &g, float u1, float u2, float u3,
                                 glm::vec3 &pWorld, glm::vec3 &nWorld,
                                 float &pdfArea) {
     float area = lightGeomArea(g);
-    pdfArea = area > 0.0f ? 1.0f / area : 0.0f;
-    if (pdfArea == 0.0f) {
+    pdfArea = 0.0f;
+    if (area <= 0.0f) {
         return;
     }
 
     // Mesh emitter: pick a triangle proportional to world area, then sample a
-    // uniform barycentric point on it. Area-weighted selection makes the pdf
-    // uniform over the surface (1/totalArea), matching lightGeomArea used by
-    // the reverse MIS weight. (Two O(numTriangles) passes -- see the note
-    // above.)
+    // uniform barycentric point on it. Area-weighted selection makes the PDF
+    // uniform over the full surface (1/totalArea), matching reverse MIS.
     if (g.type == MESH) {
+        pdfArea = 1.0f / area;
         const Triangle *tris = g.geometry.devTriangles;
         int n = g.geometry.numTriangles;
         float target = u1 * area;
@@ -612,13 +608,16 @@ __device__ void sampleLightGeom(const Geom &g, float u1, float u2, float u3,
 
     glm::vec3 pLocal, nLocal;
     if (g.type == SPHERE) {
-        // Uniform point on the unit sphere (local radius 0.5).
+        // Uniform direction on the canonical sphere (local radius 0.5).
         float z = 1.0f - 2.0f * u1;
         float r = sqrtf(fmaxf(0.0f, 1.0f - z * z));
         float phi = 2.0f * M_PIf * u2;
         nLocal = glm::vec3(r * cosf(phi), r * sinf(phi), z);
         pLocal = 0.5f * nLocal;
+        const float jacobian = affineSphereAreaJacobian(g, nLocal);
+        pdfArea = jacobian > 0.0f ? 1.0f / (M_PIf * jacobian) : 0.0f;
     } else { // CUBE
+        pdfArea = 1.0f / area;
         glm::vec3 ex = glm::vec3(g.transform.transform[0]);
         glm::vec3 ey = glm::vec3(g.transform.transform[1]);
         glm::vec3 ez = glm::vec3(g.transform.transform[2]);
@@ -662,6 +661,34 @@ __device__ float lightPdfSolidAngle(float pdfArea, const glm::vec3 &p,
         return 0.0f;
     }
     return pdfArea * dist2 / cosL;
+}
+
+__device__ int sampleAreaLightIndex(const float *cdf, int count, float u,
+                                    float &selectionPmf) {
+    selectionPmf = 0.0f;
+    if (count <= 0) {
+        return -1;
+    }
+    if (cdf == nullptr) {
+        const int index = min((int)(u * count), count - 1);
+        selectionPmf = 1.0f / count;
+        return index;
+    }
+    const float target = fminf(fmaxf(u, 0.0f), 1.0f - 1e-7f);
+    int lo = 0;
+    int hi = count;
+    while (lo < hi) {
+        const int mid = (lo + hi) >> 1;
+        if (target < cdf[mid]) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    const int index = min(lo, count - 1);
+    const float lower = index > 0 ? cdf[index - 1] : 0.0f;
+    selectionPmf = fmaxf(cdf[index] - lower, 0.0f);
+    return selectionPmf > 0.0f ? index : -1;
 }
 
 __device__ glm::vec3 checkerboard(float u, float v, int checkerSize) {
@@ -718,8 +745,12 @@ __device__ inline float illuminantSPD(int spectrumType, float blackbodyTemp,
     case SPECTRUM_A:
         return c_spectral.illumA[cieBin(lambda)];
     case SPECTRUM_E:
-        // Equal energy, luminance-normalized: 1/(CIE_Y_INTEGRAL/N) per nm.
-        return (float)N_CIE_BINS / CIE_Y_INTEGRAL;
+        // A constant SPD of 1 already has unit luminance under the sensor's
+        // convention: spectrumToRGB divides its CIE integral by
+        // CIE_Y_INTEGRAL. Applying that normalization here as well used to
+        // multiply equal-energy lights by N_CIE_BINS/CIE_Y_INTEGRAL (~4.41),
+        // clipping the homogeneous-absorption reference render.
+        return 1.0f;
     case SPECTRUM_BLACKBODY:
         return planckSPD(lambda, blackbodyTemp) * blackbodyNorm;
     case SPECTRUM_NONE:
@@ -842,7 +873,8 @@ __device__ Spectrum shadowTransmittance(const Ray &ray, float tMax,
                                         Geom *geoms, int geoms_size,
                                         Material *materials,
                                         const SampledWavelengths &swl,
-                                        thrust::default_random_engine &rng) {
+                                        thrust::default_random_engine &rng,
+                                        VolumeTrackingStats *volumeStats) {
     if (anyHit(ray, geoms, geoms_size, materials, tMax)) {
         return Spectrum(0.0f);
     }
@@ -862,10 +894,24 @@ __device__ Spectrum shadowTransmittance(const Ray &ray, float tMax,
         if (t1 <= t0) {
             continue;
         }
-        Spectrum sigT =
-            (upliftSigma(m.sigmaA, swl) + upliftSigma(m.sigmaS, swl)) *
-            m.densityScale;
-        Tr *= mediumTransmittance(g, m, sigT, ray, t0, t1, rng);
+        const Spectrum smokeA =
+            upliftSigma(m.sigmaA, swl) * m.densityScale;
+        const Spectrum smokeS =
+            upliftSigma(m.sigmaS, swl) * m.densityScale;
+        if (g.volumeGrid.valid) {
+            const Spectrum sootA =
+                upliftSigma(m.sootSigmaA, swl) * m.densityScale;
+            const Spectrum sootS =
+                upliftSigma(m.sootSigmaS, swl) * m.densityScale;
+            const Spectrum flameA =
+                smokeA * m.flameAbsorptionScale;
+            Tr *= sparseGridTransmittance(
+                g, smokeA, smokeS, sootA, sootS, flameA, ray, t0, t1,
+                rng, volumeStats);
+        } else {
+            Tr *= mediumTransmittance(g, m, smokeA + smokeS, ray, t0, t1,
+                                      rng);
+        }
         if (isBlack(Tr)) {
             return Spectrum(0.0f);
         }
@@ -873,7 +919,431 @@ __device__ Spectrum shadowTransmittance(const Ray &ray, float tMax,
     return Tr;
 }
 
+// Unbiased stratified track-length estimator for emitted radiance along a
+// camera/specular ray segment through a sparse grid. Randomized strata sample
+// emission, while an independent null-collision process carries an unbiased
+// ratio-tracked transmittance estimate between probes. Keeping those two point
+// processes separate removes the high variance in the previous Poisson-only
+// estimator (including its non-zero chance of taking no emission probe in an
+// emissive brick) without repeating a prefix-transmittance walk per probe.
+__device__ Spectrum sparseGridEmissionIntegral(
+    const Geom &g, const Material &m, const Spectrum &smokeA,
+    const Spectrum &smokeS, const Spectrum &sootA,
+    const Spectrum &sootS, const Spectrum &flameA, const Ray &ray,
+    float tMax, const SampledWavelengths &swl,
+    thrust::default_random_engine &rng, VolumeTrackingStats *volumeStats,
+    int qualityMode) {
+    thrust::uniform_real_distribution<float> u01(0, 1);
+    const SparseVolumeGridDevice &grid = g.volumeGrid;
+    const GridRay localRay = makeGridRay(g, ray);
+    Spectrum Tr(1.0f);
+    Spectrum integral(0.0f);
+    float t = 0.0f;
+    unsigned long long visits = 0;
+    unsigned long long emptySkips = 0;
+    unsigned long long nulls = 0;
+    unsigned long long violations = 0;
+    bool overflow = false;
+    const int maxBrickSteps = grid.brickResolution.x +
+                              grid.brickResolution.y +
+                              grid.brickResolution.z + 12;
+
+    for (int step = 0; step < maxBrickSteps && t < tMax; ++step) {
+        const GridBrickInterval interval =
+            locateGridBrick(grid, localRay, t, tMax);
+        ++visits;
+        if (interval.tExit <= t) {
+            overflow = true;
+            break;
+        }
+        if (interval.brickIndex < 0) {
+            ++emptySkips;
+            t = interval.tExit;
+            continue;
+        }
+
+        const VolumeBrickMeta &meta = grid.bricks[interval.brickIndex];
+        const float brickStart = t;
+        const float brickEnd = interval.tExit;
+        const float intervalLength = brickEnd - brickStart;
+        const float extMajorant =
+            gridBrickMajorant(meta, smokeA, smokeS, sootA, sootS, flameA);
+        const int emissionProbeCount =
+            meta.emissionPower > 0.0f
+                ? (qualityMode == VOLUME_QUALITY_REFERENCE ? 4 : 1)
+                : 0;
+        const float probeWidth =
+            emissionProbeCount > 0
+                ? intervalLength / (float)emissionProbeCount
+                : 0.0f;
+
+        // Generate one extinction candidate and retain it across emission
+        // strata. Discarding an exponential overshoot at every probe would
+        // change the null-collision process and bias transmittance.
+        float nextTrackingT = FLT_MAX;
+        if (extMajorant > 0.0f) {
+            nextTrackingT =
+                brickStart -
+                logf(fmaxf(1.0f - u01(rng), 1e-7f)) / extMajorant;
+        }
+        int candidateCount = 0;
+        for (int probe = 0; probe <= emissionProbeCount; ++probe) {
+            const float probeT =
+                probe < emissionProbeCount
+                    ? brickStart +
+                          ((float)probe + u01(rng)) * probeWidth
+                    : brickEnd;
+
+            // Advance the independent ratio-tracking process to this probe.
+            while (nextTrackingT < probeT &&
+                   candidateCount < 1000000) {
+                ++candidateCount;
+                CombustionFieldSample trackingFields;
+                const glm::vec3 trackingLocal =
+                    localRay.origin +
+                    nextTrackingT * localRay.direction;
+                Spectrum sigTx(0.0f);
+                if (sampleCombustionGridLocal(
+                        grid, trackingLocal, trackingFields)) {
+                    sigTx =
+                        gridSigmaA(trackingFields, smokeA, sootA, flameA) +
+                        gridSigmaS(trackingFields, smokeS, sootS);
+                }
+                if (maxComponent(sigTx) >
+                    extMajorant * (1.0f + 2e-4f) + 1e-6f) {
+                    ++violations;
+                }
+                Tr *= (Spectrum(extMajorant) - sigTx) /
+                      extMajorant;
+                ++nulls;
+
+                const float maxTr = maxComponent(Tr);
+                if (maxTr < 0.025f) {
+                    constexpr float q = 0.75f;
+                    if (u01(rng) < q) {
+                        recordVolumeTrackingStats(
+                            volumeStats, visits, emptySkips, nulls, 0,
+                            violations, 0);
+                        return integral;
+                    }
+                    Tr /= 1.0f - q;
+                }
+                nextTrackingT -=
+                    logf(fmaxf(1.0f - u01(rng), 1e-7f)) /
+                    extMajorant;
+            }
+            if (candidateCount >= 1000000) {
+                overflow = true;
+                break;
+            }
+            if (probe >= emissionProbeCount) {
+                continue;
+            }
+
+            CombustionFieldSample emissionFields;
+            const glm::vec3 emissionLocal =
+                localRay.origin + probeT * localRay.direction;
+            if (!sampleCombustionGridLocal(
+                    grid, emissionLocal, emissionFields)) {
+                continue;
+            }
+            const float source =
+                gridEmissionSource(emissionFields, m.sootEmission);
+            if (source > 0.0f) {
+                const float temperature = glm::clamp(
+                    emissionFields.temperature * m.temperatureScale,
+                    500.0f, 12000.0f);
+                const Spectrum Le = upliftIlluminant(
+                    m.color * m.emittance, swl, m.spectrumType,
+                    temperature, m.blackbodyNorm);
+                integral += Tr * Le * (source * probeWidth);
+            }
+        }
+        if (overflow) {
+            break;
+        }
+        t = brickEnd;
+    }
+    if (t < tMax) {
+        overflow = true;
+    }
+    recordVolumeTrackingStats(volumeStats, visits, emptySkips, nulls, 0,
+                              violations, overflow ? 1 : 0);
+    return overflow ? Spectrum(0.0f) : integral;
+}
+
 #if USE_MIS
+// World-ray interval through the sparse grid's local AABB. Ray directions are
+// normalized in world space, and the inverse transform deliberately leaves the
+// local direction unnormalized, so t remains a world-space distance.
+__device__ bool sparseGridInterval(const Geom &g, const glm::vec3 &origin,
+                                   const glm::vec3 &direction, float &t0,
+                                   float &t1) {
+    const SparseVolumeGridDevice &grid = g.volumeGrid;
+    const glm::vec3 ro = glm::vec3(
+        g.transform.inverseTransform * glm::vec4(origin, 1.0f));
+    const glm::vec3 rd = glm::vec3(
+        g.transform.inverseTransform * glm::vec4(direction, 0.0f));
+    t0 = -FLT_MAX;
+    t1 = FLT_MAX;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (fabsf(rd[axis]) < 1e-9f) {
+            if (ro[axis] < grid.localBoundsMin[axis] ||
+                ro[axis] > grid.localBoundsMax[axis]) {
+                return false;
+            }
+            continue;
+        }
+        const float invD = 1.0f / rd[axis];
+        const float ta = (grid.localBoundsMin[axis] - ro[axis]) * invD;
+        const float tb = (grid.localBoundsMax[axis] - ro[axis]) * invD;
+        t0 = fmaxf(t0, fminf(ta, tb));
+        t1 = fminf(t1, fmaxf(ta, tb));
+    }
+    return t1 > fmaxf(t0, 0.0f);
+}
+
+// Uniform solid angle followed by uniform distance through the grid interval.
+// With dV = r^2 dr dOmega its world-volume density is
+//   1 / (4 pi * intervalLength * r^2),
+// which cancels the singular 1/r^2 geometry term of volume-emission NEE.
+// This is only mixed in when the shading point is inside the selected grid;
+// there every direction intersects the convex grid AABB and no samples are
+// wasted on directions that miss the emitter.
+__device__ bool sampleSparseVolumeInverseSquare(
+    const Geom &g, const glm::vec3 &p, const glm::vec2 &uDirection,
+    float uDistance, float maxDistance, glm::vec3 &pLight,
+    CombustionFieldSample &fields, float &pdfWorldVolume) {
+    const float z = 1.0f - 2.0f * uDirection.x;
+    const float radial = sqrtf(fmaxf(0.0f, 1.0f - z * z));
+    const float phi = 2.0f * M_PIf * uDirection.y;
+    const glm::vec3 direction(radial * cosf(phi),
+                              radial * sinf(phi), z);
+    float t0, t1;
+    if (!sparseGridInterval(g, p, direction, t0, t1)) {
+        return false;
+    }
+    const float begin = fmaxf(t0, 0.0f);
+    const float end = fminf(t1, begin + maxDistance);
+    const float intervalLength = end - begin;
+    if (intervalLength <= 0.0f) {
+        return false;
+    }
+    const float distance = begin + uDistance * intervalLength;
+    if (distance <= 1e-8f) {
+        return false;
+    }
+    pLight = p + distance * direction;
+    const glm::vec3 pLocal = glm::vec3(
+        g.transform.inverseTransform * glm::vec4(pLight, 1.0f));
+    if (!sampleCombustionGridLocal(g.volumeGrid, pLocal, fields)) {
+        fields = {};
+    }
+    pdfWorldVolume =
+        1.0f /
+        (4.0f * M_PIf * intervalLength * distance * distance);
+    return pdfWorldVolume > 0.0f && isfinite(pdfWorldVolume);
+}
+
+__device__ float sparseVolumeInverseSquarePdf(
+    const Geom &g, const glm::vec3 &p, const glm::vec3 &pLight,
+    float maxDistance) {
+    const glm::vec3 d = pLight - p;
+    const float dist2 = glm::dot(d, d);
+    if (dist2 <= 1e-16f) {
+        return 0.0f;
+    }
+    const float distance = sqrtf(dist2);
+    const glm::vec3 direction = d / distance;
+    float t0, t1;
+    if (!sparseGridInterval(g, p, direction, t0, t1)) {
+        return 0.0f;
+    }
+    const float begin = fmaxf(t0, 0.0f);
+    const float end = fminf(t1, begin + maxDistance);
+    const float intervalLength = end - begin;
+    if (intervalLength <= 0.0f ||
+        distance < begin - 2e-4f ||
+        distance > end + 2e-4f) {
+        return 0.0f;
+    }
+    return 1.0f /
+           (4.0f * M_PIf * intervalLength * dist2);
+}
+
+// Sample one point from the two-level emitted-power hierarchy of all sparse
+// combustion grids. This is the only volume-emission strategy at diffuse
+// surface and real medium vertices; segment emission is reserved for primary
+// and specular rays, so the two techniques are mutually exclusive and cannot
+// double count.
+__device__ void sampleSparseVolumeDirect(
+    PathSegment &pathSegment, const BSDF &bsdf, const glm::vec3 &p,
+    bool isSurface, const glm::vec3 &woW, const glm::vec3 &Ng,
+    Geom *geoms, int geoms_size, Material *materials,
+    thrust::default_random_engine &rng, VolumeTrackingStats *volumeStats,
+    const VolumeIntegratorSettings &volumeSettings) {
+    if (volumeSettings.debugMode == VOLUME_DEBUG_INDIRECT_VOLUME) {
+        return;
+    }
+    thrust::uniform_real_distribution<float> u01(0, 1);
+    float totalPower = 0.0f;
+    for (int i = 0; i < geoms_size; ++i) {
+        const Geom &candidate = geoms[i];
+        if (!candidate.volumeGrid.valid) {
+            continue;
+        }
+        const Material &cm = materials[candidate.material.materialId];
+        totalPower += candidate.volumeGrid.totalEmissionPower *
+                      candidate.volumeGrid.localToWorldVolume *
+                      cm.emittance;
+    }
+    if (totalPower <= 0.0f) {
+        return;
+    }
+
+    const float select = u01(rng) * totalPower;
+    float cumulative = 0.0f;
+    int selectedIndex = -1;
+    float selectedPower = 0.0f;
+    for (int i = 0; i < geoms_size; ++i) {
+        const Geom &candidate = geoms[i];
+        if (!candidate.volumeGrid.valid) {
+            continue;
+        }
+        const Material &cm = materials[candidate.material.materialId];
+        const float power = candidate.volumeGrid.totalEmissionPower *
+                            candidate.volumeGrid.localToWorldVolume *
+                            cm.emittance;
+        cumulative += power;
+        if (select <= cumulative && power > 0.0f) {
+            selectedIndex = i;
+            selectedPower = power;
+            break;
+        }
+    }
+    if (selectedIndex < 0 || selectedPower <= 0.0f) {
+        return;
+    }
+
+    const Geom &lightGeom = geoms[selectedIndex];
+    const Material &lightMaterial =
+        materials[lightGeom.material.materialId];
+    const glm::vec3 pLocal = glm::vec3(
+        lightGeom.transform.inverseTransform * glm::vec4(p, 1.0f));
+    const bool insideGrid =
+        glm::all(glm::greaterThanEqual(
+            pLocal, lightGeom.volumeGrid.localBoundsMin)) &&
+        glm::all(glm::lessThanEqual(
+            pLocal, lightGeom.volumeGrid.localBoundsMax));
+    const glm::vec3 localBrickExtent =
+        (lightGeom.volumeGrid.localBoundsMax -
+         lightGeom.volumeGrid.localBoundsMin) /
+        glm::vec3(lightGeom.volumeGrid.brickResolution);
+    const glm::mat3 localToWorld(lightGeom.transform.transform);
+    const float nearFieldRadius =
+        1.5f *
+        fmaxf(glm::length(localToWorld *
+                          glm::vec3(localBrickExtent.x, 0.0f, 0.0f)),
+              fmaxf(glm::length(localToWorld *
+                                glm::vec3(0.0f, localBrickExtent.y, 0.0f)),
+                    glm::length(localToWorld *
+                                glm::vec3(0.0f, 0.0f,
+                                          localBrickExtent.z))));
+    // The hierarchy remains the workhorse and targets hot cells. A 10% local
+    // inverse-square component is enough to bound the r->0 weight while
+    // avoiding the high null-sample rate of a whole-grid 50/50 mixture.
+    const float hierarchyProbability = insideGrid ? 0.9f : 1.0f;
+
+    glm::vec3 pLight(0.0f);
+    CombustionFieldSample lightFields{};
+    float hierarchyPdfWorld = 0.0f;
+    float inverseSquarePdfWorld = 0.0f;
+    if (u01(rng) < hierarchyProbability) {
+        const GridEmissionPoint ep = sampleGridEmissionPoint(
+            lightGeom.volumeGrid, u01(rng), u01(rng),
+            glm::vec3(u01(rng), u01(rng), u01(rng)));
+        if (!ep.valid) {
+            return;
+        }
+        pLight = glm::vec3(lightGeom.transform.transform *
+                           glm::vec4(ep.localPosition, 1.0f));
+        lightFields = ep.fields;
+        hierarchyPdfWorld =
+            ep.pdfLocalVolume /
+            lightGeom.volumeGrid.localToWorldVolume;
+        if (insideGrid) {
+            inverseSquarePdfWorld =
+                sparseVolumeInverseSquarePdf(
+                    lightGeom, p, pLight, nearFieldRadius);
+        }
+    } else {
+        if (!sampleSparseVolumeInverseSquare(
+                lightGeom, p, glm::vec2(u01(rng), u01(rng)), u01(rng),
+                nearFieldRadius, pLight, lightFields,
+                inverseSquarePdfWorld)) {
+            return;
+        }
+        const glm::vec3 sampledLocal = glm::vec3(
+            lightGeom.transform.inverseTransform *
+            glm::vec4(pLight, 1.0f));
+        hierarchyPdfWorld =
+            gridEmissionPointPdfLocal(lightGeom.volumeGrid, sampledLocal) /
+            lightGeom.volumeGrid.localToWorldVolume;
+    }
+    const glm::vec3 d = pLight - p;
+    const float dist2 = glm::dot(d, d);
+    if (dist2 <= 1e-8f) {
+        return;
+    }
+    const float dist = sqrtf(dist2);
+    const glm::vec3 wi = d / dist;
+    if (isSurface && glm::dot(wi, Ng) <= 0.0f) {
+        return;
+    }
+    float closurePdf;
+    const Spectrum f = bsdf.eval(woW, wi, closurePdf);
+    const float cosFactor = isSurface ? glm::dot(wi, bsdf.ns) : 1.0f;
+    if (cosFactor <= 0.0f || isBlack(f)) {
+        return;
+    }
+
+    Ray shadowRay;
+    shadowRay.origin = isSurface ? p + Ng * 1e-3f : p;
+    const glm::vec3 shadowD = pLight - shadowRay.origin;
+    const float shadowDistance = glm::length(shadowD);
+    shadowRay.direction = shadowD / shadowDistance;
+    const Spectrum Tr = shadowTransmittance(
+        shadowRay, shadowDistance * (1.0f - 2e-4f), geoms, geoms_size,
+        materials, pathSegment.swl, rng, volumeStats);
+    if (isBlack(Tr)) {
+        return;
+    }
+
+    const float source =
+        gridEmissionSource(lightFields, lightMaterial.sootEmission);
+    if (source <= 0.0f) {
+        return;
+    }
+    const float temperature = glm::clamp(
+        lightFields.temperature * lightMaterial.temperatureScale, 500.0f,
+        12000.0f);
+    const Spectrum Le = upliftIlluminant(
+        lightMaterial.color * lightMaterial.emittance, pathSegment.swl,
+        lightMaterial.spectrumType, temperature,
+        lightMaterial.blackbodyNorm);
+    const float selectPdf = selectedPower / totalPower;
+    const float pdfWorldVolume =
+        selectPdf *
+        (hierarchyProbability * hierarchyPdfWorld +
+         (1.0f - hierarchyProbability) * inverseSquarePdfWorld);
+    if (pdfWorldVolume <= 0.0f) {
+        return;
+    }
+
+    pathSegment.radiance += pathSegment.color * f * cosFactor * Tr * Le *
+                            (source / (dist2 * pdfWorldVolume));
+}
+
 // Next-event estimation toward every light type (environment, area, delta),
 // shared by surface hits and medium scatter events: a medium event passes the
 // phase-function closure (makePhaseBSDF) and isSurface = false, which drops
@@ -884,10 +1354,25 @@ __device__ void sampleDirectLighting(
     PathSegment &pathSegment, const BSDF &bsdf, const glm::vec3 &p,
     bool isSurface, const glm::vec3 &woW, const glm::vec3 &Ng,
     const EnvironmentMap &envMap, Geom *geoms, int geoms_size,
-    Material *materials, Geom *lights, int numLights, DeltaLight *deltaLights,
-    int numDeltaLights, thrust::default_random_engine &rng) {
+    Material *materials, Geom *lights, int numLights,
+    const float *areaLightCdf, DeltaLight *deltaLights, int numDeltaLights,
+    thrust::default_random_engine &rng,
+    VolumeTrackingStats *volumeStats,
+    const VolumeIntegratorSettings &volumeSettings) {
     thrust::uniform_real_distribution<float> u01(0, 1);
     glm::vec3 shadowOrigin = isSurface ? p + Ng * 1e-3f : p;
+
+    if (volumeSettings.debugMode != VOLUME_DEBUG_SURFACE_FIRE ||
+        isSurface) {
+        sampleSparseVolumeDirect(pathSegment, bsdf, p, isSurface, woW, Ng,
+                                 geoms, geoms_size, materials, rng,
+                                 volumeStats, volumeSettings);
+    }
+    if (volumeSettings.debugMode == VOLUME_DEBUG_DIRECT_VOLUME ||
+        volumeSettings.debugMode == VOLUME_DEBUG_INDIRECT_VOLUME ||
+        volumeSettings.debugMode == VOLUME_DEBUG_SURFACE_FIRE) {
+        return;
+    }
 
     // --- Environment light ---
     // Sample a direction from the env's luminance distribution, evaluate the
@@ -909,7 +1394,8 @@ __device__ void sampleDirectLighting(
                 shadowRay.direction = lightDir;
                 Spectrum Tr =
                     shadowTransmittance(shadowRay, FLT_MAX, geoms, geoms_size,
-                                        materials, pathSegment.swl, rng);
+                                        materials, pathSegment.swl, rng,
+                                        volumeStats);
                 if (!isBlack(Tr)) {
                     float weight = powerHeuristic(lightPdf, bsdfPdfL);
                     Spectrum LeS = upliftIlluminant(
@@ -922,12 +1408,19 @@ __device__ void sampleDirectLighting(
     }
 
     // --- Area lights ---
-    // Pick one emitter uniformly, sample a point on it, and add its
-    // shadow-tested contribution weighted against closure sampling. Dividing
-    // by the 1/numLights selection probability makes this an unbiased
-    // estimate of all the area lights' direct contribution.
+    // Pick one emitter from the host-built emitted-power CDF, then sample a
+    // point on it. The selected PMF is part of the solid-angle PDF and is also
+    // stored on the source geom for the reverse/hit-light MIS calculation.
     if (numLights > 0) {
-        int li = min((int)(u01(rng) * numLights), numLights - 1);
+        float selectionPmf;
+        int li = sampleAreaLightIndex(areaLightCdf, numLights, u01(rng),
+                                      selectionPmf);
+        if (li < 0 || selectionPmf <= 0.0f) {
+            // Keep sampling delta lights below even if an unsupported area
+            // emitter somehow entered the distribution.
+            li = 0;
+            selectionPmf = 0.0f;
+        }
         Geom L = lights[li];
         glm::vec3 pL, nL;
         float pdfArea;
@@ -936,8 +1429,8 @@ __device__ void sampleDirectLighting(
             glm::vec3 d = pL - p;
             float dist = sqrtf(glm::dot(d, d));
             glm::vec3 lightDir = d / dist;
-            float pdfSA =
-                lightPdfSolidAngle(pdfArea, p, pL, nL) / (float)numLights;
+            float pdfSA = lightPdfSolidAngle(pdfArea, p, pL, nL) *
+                          selectionPmf;
             float cosFactor = isSurface ? glm::dot(lightDir, bsdf.ns) : 1.0f;
             if (pdfSA > 0.0f && cosFactor > 0.0f &&
                 (!isSurface || glm::dot(lightDir, Ng) > 0.0f)) {
@@ -958,7 +1451,7 @@ __device__ void sampleDirectLighting(
                     shadowRay.direction = sd / sdist;
                     Spectrum Tr = shadowTransmittance(
                         shadowRay, sdist * (1.0f - 1e-3f), geoms, geoms_size,
-                        materials, pathSegment.swl, rng);
+                        materials, pathSegment.swl, rng, volumeStats);
                     if (!isBlack(Tr)) {
                         Material lMat = materials[L.material.materialId];
                         Spectrum Le = upliftIlluminant(
@@ -1009,7 +1502,8 @@ __device__ void sampleDirectLighting(
         shadowRay.direction = lightDir;
         float tMax = (dl.type == POINT_LIGHT) ? dist - 1e-3f : FLT_MAX;
         Spectrum Tr = shadowTransmittance(shadowRay, tMax, geoms, geoms_size,
-                                          materials, pathSegment.swl, rng);
+                                          materials, pathSegment.swl, rng,
+                                          volumeStats);
         if (!isBlack(Tr)) {
             Spectrum LiS = upliftIlluminant(Li, pathSegment.swl,
                                             dl.spectrumType, dl.blackbodyTemp,
@@ -1021,13 +1515,131 @@ __device__ void sampleDirectLighting(
 }
 #endif // USE_MIS
 
+__device__ glm::vec3 volumeDebugRamp(float t) {
+    t = glm::clamp(t, 0.0f, 1.0f);
+    if (t < 0.35f) {
+        return glm::mix(glm::vec3(0.015f, 0.0f, 0.02f),
+                        glm::vec3(0.65f, 0.015f, 0.0f), t / 0.35f);
+    }
+    if (t < 0.72f) {
+        return glm::mix(glm::vec3(0.65f, 0.015f, 0.0f),
+                        glm::vec3(1.0f, 0.55f, 0.02f),
+                        (t - 0.35f) / 0.37f);
+    }
+    return glm::mix(glm::vec3(1.0f, 0.55f, 0.02f),
+                    glm::vec3(1.0f), (t - 0.72f) / 0.28f);
+}
+
+// Deterministic fixed-step compositing is intentionally confined to field
+// diagnostics. Reference radiance uses the null-collision estimators above.
+__device__ glm::vec3 renderSparseVolumeDiagnostic(
+    const Geom &g, const Material &m, const Ray &ray, float tMax,
+    int debugMode) {
+    constexpr int steps = 128;
+    const float dt = tMax / (float)steps;
+    glm::vec3 color(0.0f);
+    float transmittance = 1.0f;
+    const GridRay localRay = makeGridRay(g, ray);
+
+    for (int i = 0; i < steps && transmittance > 0.005f; ++i) {
+        const float t = ((float)i + 0.5f) * dt;
+        CombustionFieldSample f;
+        if (!sampleCombustionGridLocal(
+                g.volumeGrid, localRay.origin + t * localRay.direction, f)) {
+            continue;
+        }
+
+        const glm::vec3 sigA =
+            m.densityScale *
+            (m.sigmaA * f.density + m.sootSigmaA * f.soot +
+             m.sigmaA * (m.flameAbsorptionScale * f.reaction));
+        const glm::vec3 sigS =
+            m.densityScale *
+            (m.sigmaS * f.density + m.sootSigmaS * f.soot);
+        glm::vec3 sampleColor(0.0f);
+        float strength = 0.0f;
+        if (debugMode == VOLUME_DEBUG_TEMPERATURE) {
+            strength =
+                glm::clamp((f.temperature - 293.15f) / 2500.0f, 0.0f, 1.0f);
+            sampleColor = volumeDebugRamp(strength);
+        } else if (debugMode == VOLUME_DEBUG_DENSITY) {
+            strength = glm::clamp(f.density, 0.0f, 1.0f);
+            sampleColor = glm::vec3(strength);
+        } else if (debugMode == VOLUME_DEBUG_FUEL) {
+            strength = glm::clamp(f.fuel, 0.0f, 1.0f);
+            sampleColor = strength * glm::vec3(0.18f, 0.85f, 0.08f);
+        } else if (debugMode == VOLUME_DEBUG_SOOT) {
+            strength = glm::clamp(f.soot, 0.0f, 1.0f);
+            sampleColor = strength * glm::vec3(0.72f, 0.62f, 0.52f);
+        } else if (debugMode == VOLUME_DEBUG_REACTION) {
+            strength = glm::clamp(f.reaction, 0.0f, 1.0f);
+            sampleColor =
+                strength * glm::vec3(1.0f, 0.20f + 0.65f * strength, 0.01f);
+        } else if (debugMode == VOLUME_DEBUG_EMISSION) {
+            const float thermal =
+                powf(glm::clamp(f.temperature / 2600.0f, 0.0f, 2.0f), 4.0f);
+            strength = glm::clamp(
+                gridEmissionSource(f, m.sootEmission) * thermal, 0.0f, 1.0f);
+            sampleColor = volumeDebugRamp(
+                glm::clamp((f.temperature - 600.0f) / 2400.0f, 0.0f, 1.0f)) *
+                          strength;
+        } else if (debugMode == VOLUME_DEBUG_SIGMA_A) {
+            strength = glm::clamp(maxComponent(sigA), 0.0f, 1.0f);
+            sampleColor = glm::clamp(sigA, glm::vec3(0.0f), glm::vec3(1.0f));
+        } else if (debugMode == VOLUME_DEBUG_SIGMA_S) {
+            strength = glm::clamp(maxComponent(sigS), 0.0f, 1.0f);
+            sampleColor = glm::clamp(sigS, glm::vec3(0.0f), glm::vec3(1.0f));
+        } else if (debugMode == VOLUME_DEBUG_SIGMA_T) {
+            strength =
+                glm::clamp(maxComponent(sigA + sigS), 0.0f, 1.0f);
+            sampleColor =
+                glm::clamp(sigA + sigS, glm::vec3(0.0f), glm::vec3(1.0f));
+        } else if (debugMode == VOLUME_DEBUG_VELOCITY) {
+            const float speed = glm::length(f.velocity);
+            strength = glm::clamp(speed * 3.0f, 0.0f, 1.0f);
+            const glm::vec3 direction =
+                speed > 1e-6f ? f.velocity / speed : glm::vec3(0.0f);
+            sampleColor = (0.5f + 0.5f * direction) * strength;
+        } else if (debugMode == VOLUME_DEBUG_MAJORANT) {
+            const GridBrickInterval interval =
+                locateGridBrick(g.volumeGrid, localRay, t, tMax);
+            float majorant = 0.0f;
+            if (interval.brickIndex >= 0) {
+                const VolumeBrickMeta &meta =
+                    g.volumeGrid.bricks[interval.brickIndex];
+                majorant =
+                    m.densityScale *
+                    (meta.maxDensity *
+                         maxComponent(m.sigmaA + m.sigmaS) +
+                     meta.maxSoot *
+                         maxComponent(m.sootSigmaA + m.sootSigmaS) +
+                     meta.maxReaction *
+                         maxComponent(m.sigmaA *
+                                      m.flameAbsorptionScale));
+            }
+            strength = 1.0f - expf(-0.35f * majorant);
+            sampleColor =
+                glm::vec3(strength, 0.15f * strength, 1.0f - strength);
+        }
+
+        const float alpha =
+            1.0f - expf(-fmaxf(strength, 0.0f) * dt * 6.0f);
+        color += transmittance * sampleColor * alpha;
+        transmittance *= 1.0f - alpha;
+    }
+    return color;
+}
+
 __global__ void shade(int iter, int depth, int num_paths,
                       ShadeableIntersection *shadeableIntersections,
                       PathSegment *pathSegments, Material *materials,
                       Texture *albedoTextures, Texture *normalTextures,
                       Texture *bumpTextures, EnvironmentMap envMap, Geom *geoms,
                       int geoms_size, Geom *lights, int numLights,
-                      DeltaLight *deltaLights, int numDeltaLights) {
+                      const float *areaLightCdf, DeltaLight *deltaLights,
+                      int numDeltaLights,
+                      VolumeTrackingStats *volumeStats,
+                      VolumeIntegratorSettings volumeSettings) {
     // As long as we enter here, it means the ray has remaining bounces > 0
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_paths) {
@@ -1085,11 +1697,35 @@ __global__ void shade(int iter, int depth, int num_paths,
     if (pathSegment.mediumGeom >= 0) {
         const Geom &mg = geoms[pathSegment.mediumGeom];
         const Material mm = materials[mg.material.materialId];
-        Spectrum sigA =
+        Spectrum smokeA =
             upliftSigma(mm.sigmaA, pathSegment.swl) * mm.densityScale;
-        Spectrum sigS =
+        Spectrum smokeS =
             upliftSigma(mm.sigmaS, pathSegment.swl) * mm.densityScale;
-        Spectrum sigT = sigA + sigS;
+        Spectrum sigT = smokeA + smokeS;
+        Spectrum sootA(0.0f);
+        Spectrum sootS(0.0f);
+        Spectrum flameA(0.0f);
+        if (mg.volumeGrid.valid) {
+            sootA =
+                upliftSigma(mm.sootSigmaA, pathSegment.swl) * mm.densityScale;
+            sootS =
+                upliftSigma(mm.sootSigmaS, pathSegment.swl) * mm.densityScale;
+            flameA = smokeA * mm.flameAbsorptionScale;
+        }
+
+        if (mg.volumeGrid.valid &&
+            volumeSettings.debugMode >= VOLUME_DEBUG_TEMPERATURE &&
+            volumeSettings.debugMode <= VOLUME_DEBUG_MAJORANT) {
+            const glm::vec3 diagnostic = renderSparseVolumeDiagnostic(
+                mg, mm, pathSegment.ray, intersection.t,
+                volumeSettings.debugMode);
+            pathSegment.radiance +=
+                pathSegment.color *
+                upliftIlluminant(diagnostic, pathSegment.swl, SPECTRUM_NONE,
+                                 0.0f, 0.0f);
+            pathSegment.remainingBounces = 0;
+            return;
+        }
 
         // Estimate the emitted-radiance term independently over the complete
         // segment to the next boundary/surface:
@@ -1099,8 +1735,35 @@ __global__ void shade(int iter, int depth, int num_paths,
         // with ratio tracking. Keeping every carried wavelength makes the
         // estimator compatible with both packet-balance free-flight weights
         // and paths whose secondary wavelengths were terminated by dispersion.
-        if (mm.emittance > 0.0f && intersection.t > 0.0f) {
-            constexpr int emissionSamples = 4;
+        bool estimateSegmentEmission = true;
+#if USE_MIS
+        if (mg.volumeGrid.valid) {
+            // Diffuse/phase vertices use the explicit emitted-volume NEE
+            // hierarchy. Primary and specular paths use this ray estimator.
+            estimateSegmentEmission = pathSegment.specularBounce;
+            if (volumeSettings.debugMode == VOLUME_DEBUG_INDIRECT_VOLUME) {
+                estimateSegmentEmission = !pathSegment.specularBounce;
+            } else if (volumeSettings.debugMode ==
+                           VOLUME_DEBUG_DIRECT_VOLUME ||
+                       volumeSettings.debugMode ==
+                           VOLUME_DEBUG_SURFACE_FIRE) {
+                estimateSegmentEmission = false;
+            }
+        }
+#endif
+        if (mm.emittance > 0.0f && intersection.t > 0.0f &&
+            estimateSegmentEmission) {
+            if (mg.volumeGrid.valid) {
+                const Spectrum emissionIntegral =
+                    sparseGridEmissionIntegral(
+                        mg, mm, smokeA, smokeS, sootA, sootS, flameA,
+                        pathSegment.ray, intersection.t, pathSegment.swl, rng,
+                        volumeStats, volumeSettings.quality);
+                pathSegment.radiance +=
+                    pathSegment.color * emissionIntegral;
+            } else {
+            const int emissionSamples =
+                mm.mediumProfile == MEDIUM_PROFILE_FIRE_FRONT ? 8 : 4;
             Spectrum emissionIntegral(0.0f);
             for (int es = 0; es < emissionSamples; ++es) {
                 float te =
@@ -1131,18 +1794,54 @@ __global__ void shade(int iter, int depth, int num_paths,
             pathSegment.radiance +=
                 pathSegment.color * emissionIntegral *
                 (intersection.t / (float)emissionSamples);
+            }
         }
 
-        MediumSample msamp =
-            mm.heterogeneous
-                ? sampleMediumHeterogeneous(mg, mm, sigT, sigS,
-                                            pathSegment.ray, intersection.t,
-                                            rng)
-                : sampleMediumHomogeneous(sigT, sigS, intersection.t,
-                                          u01(rng));
+        MediumSample msamp;
+        if (mg.volumeGrid.valid) {
+            msamp = sampleMediumSparseGrid(
+                mg, smokeA, smokeS, sootA, sootS, flameA, pathSegment.ray,
+                intersection.t, rng, volumeStats);
+        } else if (mm.heterogeneous) {
+            msamp = sampleMediumHeterogeneous(
+                mg, mm, sigT, smokeS, pathSegment.ray, intersection.t, rng);
+        } else {
+            msamp = sampleMediumHomogeneous(sigT, smokeS, intersection.t,
+                                            u01(rng));
+        }
+
+        if (mg.volumeGrid.valid &&
+            (volumeSettings.debugMode == VOLUME_DEBUG_NULL_RATE ||
+             volumeSettings.debugMode == VOLUME_DEBUG_EVENT_COUNT)) {
+            float value =
+                volumeSettings.debugMode == VOLUME_DEBUG_NULL_RATE
+                    ? (float)msamp.nullCollisions /
+                          (float)fmaxf(msamp.nullCollisions +
+                                         msamp.brickVisits,
+                                     1)
+                    : 1.0f - expf(-0.18f *
+                                  (float)(msamp.nullCollisions +
+                                          (msamp.scattered ? 1 : 0)));
+            const glm::vec3 diagnostic =
+                volumeDebugRamp(glm::clamp(value, 0.0f, 1.0f));
+            pathSegment.radiance +=
+                pathSegment.color *
+                upliftIlluminant(diagnostic, pathSegment.swl, SPECTRUM_NONE,
+                                 0.0f, 0.0f);
+            pathSegment.remainingBounces = 0;
+            return;
+        }
 
         pathSegment.color *= msamp.weight;
         if (msamp.scattered) {
+            const int scatterLimit =
+                volumeSettings.quality == VOLUME_QUALITY_DEBUG
+                    ? 1
+                    : volumeSettings.maxScatteringDepth;
+            if (pathSegment.volumeScatteringDepth >= scatterLimit) {
+                pathSegment.remainingBounces = 0;
+                return;
+            }
             glm::vec3 scatterP =
                 pathSegment.ray.origin + msamp.t * pathSegment.ray.direction;
             glm::vec3 woW = -pathSegment.ray.direction;
@@ -1151,7 +1850,9 @@ __global__ void shade(int iter, int depth, int num_paths,
             sampleDirectLighting(pathSegment, phase, scatterP,
                                  /*isSurface=*/false, woW, glm::vec3(0.0f),
                                  envMap, geoms, geoms_size, materials, lights,
-                                 numLights, deltaLights, numDeltaLights, rng);
+                                 numLights, areaLightCdf, deltaLights,
+                                 numDeltaLights, rng, volumeStats,
+                                 volumeSettings);
 #endif
             glm::vec2 uPhase(u01(rng), u01(rng));
             BSDFSample ps;
@@ -1161,6 +1862,7 @@ __global__ void shade(int iter, int depth, int num_paths,
             pathSegment.bsdfPdf = ps.pdf;
             pathSegment.specularBounce = false;
             pathSegment.lastVertexDistance = 0.0f;
+            pathSegment.volumeScatteringDepth++;
             // mediumGeom unchanged: the path is still inside the medium.
 
 #if (USE_RUSSIAN_ROULETTE)
@@ -1188,10 +1890,23 @@ __global__ void shade(int iter, int depth, int num_paths,
     if (material.type == MatType::MEDIUM) {
         bool entering = pathSegment.mediumGeom != intersection.hitGeomIndex;
         pathSegment.mediumGeom = entering ? intersection.hitGeomIndex : -1;
-        pathSegment.lastVertexDistance += intersection.t + 2e-3f;
+        const Geom &mediumGeom = geoms[intersection.hitGeomIndex];
+        const glm::vec3 localDirection = glm::vec3(
+            mediumGeom.transform.inverseTransform *
+            glm::vec4(pathSegment.ray.direction, 0.0f));
+        const float localUnitsPerWorld =
+            fmaxf(glm::length(localDirection), 1e-7f);
+        // Advance by about 1e-3 in the medium's local space. A fixed world
+        // epsilon is too small after a large inverse scale (the wildfire
+        // volume is 20 units deep) and can immediately re-hit the entrance,
+        // toggling the ray back to vacuum before transport is evaluated.
+        const float boundaryNudge =
+            glm::clamp(1e-3f / localUnitsPerWorld, 2e-3f, 5e-2f);
+        pathSegment.lastVertexDistance +=
+            intersection.t + boundaryNudge;
         pathSegment.ray.origin =
             getPointOnRay(pathSegment.ray, intersection.t) +
-            pathSegment.ray.direction * 2e-3f;
+            pathSegment.ray.direction * boundaryNudge;
         return;
     }
 
@@ -1252,16 +1967,23 @@ __global__ void shade(int iter, int depth, int num_paths,
 #if USE_MIS
         if (!pathSegment.specularBounce && numLights > 0 &&
             intersection.hitGeomIndex >= 0) {
-            float area = lightGeomArea(geoms[intersection.hitGeomIndex]);
+            const Geom &hitGeom = geoms[intersection.hitGeomIndex];
+            const glm::vec3 hitPoint =
+                getPointOnRay(pathSegment.ray, intersection.t);
+            const float pdfArea =
+                lightGeomPdfAreaAtPoint(hitGeom, hitPoint);
+            const float selectionPmf = hitGeom.areaLightSelectionPmf;
             glm::vec3 nL = glm::normalize(intersection.surfaceGeometricNormal);
             float cosL = fabsf(glm::dot(nL, pathSegment.ray.direction));
-            if (area > 0.0f && cosL > 0.0f) {
-                // Solid-angle light pdf for this hit, incl. 1/numLights uniform
-                // light selection -- matches the NEE sampler below.
+            if (pdfArea > 0.0f && selectionPmf > 0.0f && cosL > 0.0f) {
+                // Solid-angle light pdf for this exact hit, including the
+                // power-weighted discrete selection PMF and (for affine
+                // spheres) the local-to-world area Jacobian. This matches the
+                // NEE sampler above.
                 float fullDistance =
                     pathSegment.lastVertexDistance + intersection.t;
-                float lightPdf = (fullDistance * fullDistance) /
-                                 (area * cosL * (float)numLights);
+                float lightPdf = selectionPmf * pdfArea *
+                                 (fullDistance * fullDistance) / cosL;
                 weight = powerHeuristic(pathSegment.bsdfPdf, lightPdf);
             }
         }
@@ -1315,7 +2037,8 @@ __global__ void shade(int iter, int depth, int num_paths,
             sampleDirectLighting(pathSegment, bsdf, oldIntersect,
                                  /*isSurface=*/true, woW, Ng, envMap, geoms,
                                  geoms_size, materials, lights, numLights,
-                                 deltaLights, numDeltaLights, rng);
+                                 areaLightCdf, deltaLights, numDeltaLights, rng,
+                                 volumeStats, volumeSettings);
         }
 #endif // USE_MIS
 
@@ -1439,6 +2162,12 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
     const int traceDepth = hst_scene->state.traceDepth;
     const Camera &cam = hst_scene->state.camera;
     const int pixelcount = cam.resolution.x * cam.resolution.y;
+    // Do not let a stale allocation accidentally re-enable instrumentation if
+    // an interactive caller changes integrator settings between frames.
+    VolumeTrackingStats *const volumeTrackingStats =
+        hst_scene->volumeIntegrator.reportTrackingStats != 0
+            ? dev.volumeTrackingStats
+            : nullptr;
 
     // 2D block for generating ray from camera
     // This is a common choice for image workloads: a small 2D tile of pixels
@@ -1527,8 +2256,9 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
             iter, depth, num_paths, dev.intersections, dev.paths, dev.materials,
             dev.albedoTextures, dev.normalTextures, dev.bumpTextures,
             dev.envMap, dev.geoms, hst_scene->geoms.size(), dev.lights,
-            (int)hst_scene->lights.size(), dev.deltaLights,
-            (int)hst_scene->deltaLights.size());
+            (int)hst_scene->lights.size(), dev.areaLightCdf, dev.deltaLights,
+            (int)hst_scene->deltaLights.size(), volumeTrackingStats,
+            hst_scene->volumeIntegrator);
         cudaDeviceSynchronize();
 
 #if USE_STREAM_COMPACTION

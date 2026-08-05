@@ -560,6 +560,10 @@ DerivedData
 !default.perspectivev3
 xcuserdata
 
+# Scene mesh assets are source data, not compiled MSVC object files.
+!scenes/meshes/obj/
+!scenes/meshes/obj/*.obj
+
 ## Other
 *.xccheckout
 *.moved-aside

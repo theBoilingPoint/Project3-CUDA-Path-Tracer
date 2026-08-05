@@ -1,0 +1,108 @@
+{
+  "Materials": {
+    "ground": {
+      "TYPE": "Diffuse",
+      "RGB": [0.035, 0.024, 0.017]
+    },
+    "char": {
+      "TYPE": "Microfacet",
+      "RGB": [0.018, 0.012, 0.008],
+      "SPEC_RGB": [0.08, 0.06, 0.045],
+      "ROUGHNESS": 0.90,
+      "IOR": 1.46
+    },
+    "endgrain": {
+      "TYPE": "Microfacet",
+      "RGB": [0.18, 0.065, 0.018],
+      "SPEC_RGB": [0.10, 0.06, 0.03],
+      "ROUGHNESS": 0.88,
+      "IOR": 1.46
+    },
+    "combustion": {
+      "TYPE": "Medium",
+      "FIELD_MODEL": "SparseGrid",
+      "SIGMA_A": [0.16, 0.17, 0.19],
+      "SIGMA_S": [0.24, 0.25, 0.26],
+      "SOOT_SIGMA_A": [1.95, 1.62, 1.25],
+      "SOOT_SIGMA_S": [0.025, 0.028, 0.032],
+      "FLAME_ABSORPTION_SCALE": 0.028,
+      "G": 0.42,
+      "DENSITY": 0.78,
+      "HETEROGENEOUS": true,
+      "TEMPERATURE_SCALE": 1.05,
+      "SOOT_EMISSION_MULTIPLIER": 0.10,
+      "EMISSION": 2.8,
+      "EMISSION_RGB": [1.0, 1.0, 1.0],
+      "SPECTRUM": {"BLACKBODY": 1750.0}
+    }
+  },
+  "Textures": {},
+  "Integrator": {
+    "VOLUME_QUALITY": "Reference",
+    "VOLUME_DEBUG": "None",
+    "VOLUME_MAX_SCATTER_DEPTH": 10,
+    "VOLUME_STATS": true
+  },
+  "Environment": {
+    "TEXTURE_PATH": "../../../textures/env/grasslands_sunset_2k.hdr",
+    "INTENSITY": 0.012,
+    "ROTATION": 218.0
+  },
+  "Lights": [],
+  "Camera": {
+    "RES": [640, 360],
+    "FOVY": 34.0,
+    "ITERATIONS": 32,
+    "DEPTH": 24,
+    "FILE": "single_burning_log",
+    "EXPOSURE": -1.2,
+    "TONEMAP": true,
+    "EYE": [4.6, 3.0, 8.2],
+    "LOOKAT": [0.0, 1.8, 0.0],
+    "UP": [0.0, 1.0, 0.0]
+  },
+  "Objects": [
+    {
+      "TYPE": "cube",
+      "MATERIAL": "ground",
+      "TRANS": [0.0, -0.18, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [18.0, 0.35, 18.0]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../../meshes/obj/showcase_candle_cylinder.obj",
+      "MATERIAL": "char",
+      "TRANS": [0.0, 0.62, 0.0],
+      "ROTAT": [4.0, 16.0, 3.0],
+      "SCALE": [5.2, 3.3, 3.3]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../../meshes/obj/showcase_log_caps.obj",
+      "MATERIAL": "endgrain",
+      "TRANS": [0.0, 0.62, 0.0],
+      "ROTAT": [4.0, 16.0, 3.0],
+      "SCALE": [5.30, 3.23, 3.23]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "combustion",
+      "TRANS": [0.0, 3.55, -0.75],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [6.8, 7.2, 4.8],
+      "VOLUME_GRID": {
+        "PRESET": "WoodFire",
+        "RESOLUTION": [48, 64, 40],
+        "SEED": 41,
+        "WIND": [0.035, 0.09, -0.10],
+        "DENSITY_SCALE": 0.98,
+        "SOOT_SCALE": 0.85,
+        "REACTION_SCALE": 1.10,
+        "TURBULENCE_SCALE": 1.12,
+        "BUOYANCY_SCALE": 1.08,
+        "SMOKE_ADVECTION": 1.15
+      }
+    }
+  ]
+}

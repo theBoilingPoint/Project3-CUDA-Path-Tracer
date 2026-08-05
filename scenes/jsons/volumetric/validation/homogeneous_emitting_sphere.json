@@ -1,0 +1,44 @@
+{
+  "Materials": {
+    "emitting_gas": {
+      "TYPE": "Medium",
+      "SIGMA_A": [0.60, 0.60, 0.60],
+      "SIGMA_S": [0.0, 0.0, 0.0],
+      "G": 0.0,
+      "DENSITY": 1.0,
+      "HETEROGENEOUS": false,
+      "EMISSION": 2.0,
+      "EMISSION_RGB": [1.0, 1.0, 1.0],
+      "SPECTRUM": {"BLACKBODY": 1800.0}
+    }
+  },
+  "Textures": {},
+  "Integrator": {
+    "VOLUME_QUALITY": "Reference",
+    "VOLUME_DEBUG": "None",
+    "VOLUME_MAX_SCATTER_DEPTH": 4,
+    "VOLUME_STATS": true
+  },
+  "Lights": [],
+  "Camera": {
+    "RES": [320, 320],
+    "FOVY": 30.0,
+    "ITERATIONS": 32,
+    "DEPTH": 8,
+    "FILE": "homogeneous_emitting_sphere",
+    "EXPOSURE": -2.0,
+    "TONEMAP": false,
+    "EYE": [0.0, 0.0, 4.5],
+    "LOOKAT": [0.0, 0.0, 0.0],
+    "UP": [0.0, 1.0, 0.0]
+  },
+  "Objects": [
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "emitting_gas",
+      "TRANS": [0.0, 0.0, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [2.0, 2.0, 2.0]
+    }
+  ]
+}

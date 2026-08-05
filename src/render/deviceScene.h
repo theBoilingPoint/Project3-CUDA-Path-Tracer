@@ -14,6 +14,19 @@ struct TextureResource {
     cudaArray_t array;          // to cudaFreeArray (backing storage)
 };
 
+// One host-side ownership record for the device allocations backing a sparse
+// combustion grid. Geom stores only a read-only device view into these arrays.
+struct VolumeGridResource {
+    int *pageTable = nullptr;
+    VolumeBrickMeta *bricks = nullptr;
+    cudaArray_t combustionArray = nullptr;
+    cudaArray_t thermalFlowArray = nullptr;
+    cudaTextureObject_t combustionTexture = 0;
+    cudaTextureObject_t thermalFlowTexture = 0;
+    float *brickEmissionCdf = nullptr;
+    float *cellEmissionCdf = nullptr;
+};
+
 // Owns every allocation that lives in device memory for a render, plus the
 // host-only handles needed to release them. Created/filled by deviceSceneInit
 // and released by deviceSceneFree; the render kernels in pathtrace.cu read the
@@ -23,6 +36,7 @@ struct DeviceScene {
     // Geometry + flattened BVH (one concatenated array each, indexed per geom).
     Geom *geoms = nullptr;
     Geom *lights = nullptr;
+    float *areaLightCdf = nullptr;
     Triangle *geomTriangles = nullptr;
     Triangle *lightTriangles = nullptr;
     LinearBVHNode *geomBVHNodes = nullptr;
@@ -37,6 +51,10 @@ struct DeviceScene {
 
     // Delta (point/directional) lights, sampled by NEE only. May be null/empty.
     DeltaLight *deltaLights = nullptr;
+
+    // Sparse combustion grids and their correctness/performance counters.
+    std::vector<VolumeGridResource> volumeGridResources;
+    VolumeTrackingStats *volumeTrackingStats = nullptr;
 
     // Equirectangular HDR environment map (valid == 0 when none configured).
     // Backed by a texture resource tracked in `textureResources` for teardown.

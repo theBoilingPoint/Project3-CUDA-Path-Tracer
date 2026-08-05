@@ -1,0 +1,130 @@
+{
+  "Materials": {
+    "ground": {
+      "TYPE": "Diffuse",
+      "RGB": [0.030, 0.025, 0.016]
+    },
+    "dry_grass": {
+      "TYPE": "Diffuse",
+      "RGB": [0.17, 0.10, 0.035]
+    },
+    "burned_grass": {
+      "TYPE": "Diffuse",
+      "RGB": [0.010, 0.008, 0.006]
+    },
+    "combustion": {
+      "TYPE": "Medium",
+      "FIELD_MODEL": "SparseGrid",
+      "SIGMA_A": [0.14, 0.15, 0.17],
+      "SIGMA_S": [0.25, 0.26, 0.27],
+      "SOOT_SIGMA_A": [2.20, 1.82, 1.38],
+      "SOOT_SIGMA_S": [0.030, 0.034, 0.038],
+      "FLAME_ABSORPTION_SCALE": 0.024,
+      "G": 0.52,
+      "DENSITY": 0.86,
+      "HETEROGENEOUS": true,
+      "TEMPERATURE_SCALE": 1.03,
+      "SOOT_EMISSION_MULTIPLIER": 0.14,
+      "EMISSION": 5.0,
+      "EMISSION_RGB": [1.0, 1.0, 1.0],
+      "SPECTRUM": {"BLACKBODY": 1700.0}
+    }
+  },
+  "Textures": {},
+  "Integrator": {
+    "VOLUME_QUALITY": "Reference",
+    "VOLUME_DEBUG": "None",
+    "VOLUME_MAX_SCATTER_DEPTH": 10,
+    "VOLUME_STATS": true
+  },
+  "Environment": {
+    "TEXTURE_PATH": "../../../textures/env/grasslands_sunset_2k.hdr",
+    "INTENSITY": 0.020,
+    "ROTATION": 205.0
+  },
+  "Lights": [
+    {
+      "TYPE": "Directional",
+      "DIRECTION": [-0.42, -0.62, -0.31],
+      "RGB": [1.0, 0.90, 0.78],
+      "SPECTRUM": "D65",
+      "INTENSITY": 0.55
+    }
+  ],
+  "Camera": {
+    "RES": [640, 360],
+    "FOVY": 36.0,
+    "ITERATIONS": 16,
+    "DEPTH": 24,
+    "FILE": "grass_strip_wind",
+    "EXPOSURE": -0.4,
+    "TONEMAP": true,
+    "EYE": [0.0, 2.4, 14.0],
+    "LOOKAT": [0.0, 1.4, -1.0],
+    "UP": [0.0, 1.0, 0.0]
+  },
+  "Objects": [
+    {
+      "TYPE": "cube",
+      "MATERIAL": "ground",
+      "TRANS": [0.0, -0.16, -2.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [24.0, 0.30, 24.0]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "burned_grass",
+      "TRANS": [-4.5, 0.20, 0.7],
+      "ROTAT": [0.0, -12.0, -8.0],
+      "SCALE": [2.2, 0.42, 0.18]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "burned_grass",
+      "TRANS": [-2.0, 0.25, 0.4],
+      "ROTAT": [0.0, 10.0, 7.0],
+      "SCALE": [1.8, 0.50, 0.16]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "dry_grass",
+      "TRANS": [0.2, 0.28, 0.6],
+      "ROTAT": [0.0, -8.0, -5.0],
+      "SCALE": [1.5, 0.56, 0.15]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "dry_grass",
+      "TRANS": [2.4, 0.26, 0.3],
+      "ROTAT": [0.0, 15.0, 9.0],
+      "SCALE": [1.9, 0.52, 0.17]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "dry_grass",
+      "TRANS": [4.8, 0.30, 0.5],
+      "ROTAT": [0.0, -18.0, -6.0],
+      "SCALE": [2.1, 0.60, 0.16]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "combustion",
+      "TRANS": [0.0, 4.85, -1.2],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [13.0, 10.0, 6.0],
+      "VOLUME_GRID": {
+        "PRESET": "Wildfire",
+        "RESOLUTION": [64, 48, 40],
+        "SEED": 223,
+        "WIND": [0.30, 0.10, -0.35],
+        "DENSITY_SCALE": 1.10,
+        "SOOT_SCALE": 1.25,
+        "FUEL_SCALE": 1.15,
+        "REACTION_SCALE": 1.12,
+        "TURBULENCE_SCALE": 1.24,
+        "BUOYANCY_SCALE": 0.92,
+        "SMOKE_ADVECTION": 1.55
+      }
+    }
+  ]
+}

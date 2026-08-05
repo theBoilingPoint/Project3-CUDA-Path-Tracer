@@ -1,0 +1,458 @@
+{
+  "Materials": {
+    "ground": {
+      "TYPE": "Diffuse",
+      "RGB": [0.060, 0.039, 0.022]
+    },
+    "trunk": {
+      "TYPE": "Diffuse",
+      "RGB": [0.105, 0.052, 0.020]
+    },
+    "charred_trunk": {
+      "TYPE": "Diffuse",
+      "RGB": [0.009, 0.008, 0.007]
+    },
+    "foliage": {
+      "TYPE": "Diffuse",
+      "RGB": [0.040, 0.055, 0.028]
+    },
+    "burning_foliage": {
+      "TYPE": "Diffuse",
+      "RGB": [0.065, 0.025, 0.008]
+    },
+    "burn_scar": {
+      "TYPE": "Diffuse",
+      "RGB": [0.018, 0.014, 0.010]
+    },
+    "ash": {
+      "TYPE": "Microfacet",
+      "RGB": [0.070, 0.064, 0.056],
+      "SPEC_RGB": [0.026, 0.024, 0.021],
+      "ROUGHNESS": 0.98,
+      "IOR": 1.44
+    },
+    "hot_coal": {
+      "TYPE": "Emitting",
+      "RGB": [1.0, 0.58, 0.24],
+      "EMITTANCE": 0.005,
+      "SPECTRUM": {"BLACKBODY": 1120.0}
+    },
+    "ember": {
+      "TYPE": "Emitting",
+      "RGB": [1.0, 0.70, 0.34],
+      "EMITTANCE": 1.25,
+      "SPECTRUM": {"BLACKBODY": 1520.0}
+    },
+    "combustion": {
+      "TYPE": "Medium",
+      "FIELD_MODEL": "SparseGrid",
+      "SIGMA_A": [0.14, 0.15, 0.16],
+      "SIGMA_S": [0.48, 0.51, 0.55],
+      "SOOT_SIGMA_A": [0.92, 0.82, 0.74],
+      "SOOT_SIGMA_S": [0.46, 0.50, 0.55],
+      "FLAME_ABSORPTION_SCALE": 0.065,
+      "G": 0.58,
+      "DENSITY": 1.00,
+      "HETEROGENEOUS": true,
+      "TEMPERATURE_SCALE": 0.90,
+      "SOOT_EMISSION_MULTIPLIER": 0.035,
+      "EMISSION": 0.80,
+      "EMISSION_RGB": [1.0, 1.0, 1.0],
+      "SPECTRUM": {"BLACKBODY": 1700.0}
+    }
+  },
+  "Integrator": {
+    "VOLUME_QUALITY": "Reference",
+    "VOLUME_DEBUG": "None",
+    "VOLUME_MAX_SCATTER_DEPTH": 12,
+    "VOLUME_STATS": false
+  },
+  "Environment": {
+    "TEXTURE_PATH": "../../textures/env/grasslands_sunset_2k.hdr",
+    "INTENSITY": 0.18,
+    "ROTATION": 205.0
+  },
+  "Lights": [
+    {
+      "TYPE": "Directional",
+      "DIRECTION": [-0.42, -0.62, -0.31],
+      "RGB": [1.0, 0.90, 0.78],
+      "SPECTRUM": "D65",
+      "INTENSITY": 1.55
+    }
+  ],
+  "Camera": {
+    "RES": [960, 540],
+    "FOVY": 35.0,
+    "ITERATIONS": 1536,
+    "DEPTH": 40,
+    "FILE": "showcase_wildfire",
+    "EXPOSURE": -1.75,
+    "TONEMAP": true,
+    "EYE": [14.5, 3.6, 22.0],
+    "LOOKAT": [0.0, 2.7, 6.4],
+    "UP": [0.0, 1.0, 0.0]
+  },
+  "Objects": [
+    {
+      "TYPE": "cube",
+      "MATERIAL": "ground",
+      "TRANS": [0.0, -0.20, -4.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [80.0, 0.40, 80.0]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "trunk",
+      "TRANS": [-12.0, 6.8, 1.6],
+      "ROTAT": [0.0, 4.0, 88.0],
+      "SCALE": [13.8, 1.65, 1.65]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "charred_trunk",
+      "TRANS": [-8.0, 8.0, -0.8],
+      "ROTAT": [0.0, -7.0, 91.0],
+      "SCALE": [16.0, 1.55, 1.55]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "trunk",
+      "TRANS": [-3.5, 9.0, 0.7],
+      "ROTAT": [0.0, 8.0, 89.0],
+      "SCALE": [18.0, 1.90, 1.90]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "charred_trunk",
+      "TRANS": [1.0, 7.6, -2.2],
+      "ROTAT": [0.0, -5.0, 92.0],
+      "SCALE": [15.2, 1.45, 1.45]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "trunk",
+      "TRANS": [5.3, 8.5, 0.4],
+      "ROTAT": [0.0, 6.0, 87.5],
+      "SCALE": [17.0, 1.75, 1.75]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "charred_trunk",
+      "TRANS": [9.4, 7.2, -2.8],
+      "ROTAT": [0.0, -9.0, 91.5],
+      "SCALE": [14.4, 1.40, 1.40]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "trunk",
+      "TRANS": [12.7, 6.3, 0.8],
+      "ROTAT": [0.0, 10.0, 88.5],
+      "SCALE": [12.6, 1.35, 1.35]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "charred_trunk",
+      "TRANS": [-10.0, 6.0, -9.0],
+      "ROTAT": [0.0, 3.0, 90.5],
+      "SCALE": [12.0, 1.05, 1.05]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "trunk",
+      "TRANS": [-5.8, 7.0, -11.5],
+      "ROTAT": [0.0, -4.0, 89.0],
+      "SCALE": [14.0, 1.10, 1.10]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "charred_trunk",
+      "TRANS": [3.6, 7.5, -10.8],
+      "ROTAT": [0.0, 5.0, 91.0],
+      "SCALE": [15.0, 1.15, 1.15]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "trunk",
+      "TRANS": [11.0, 5.8, -9.5],
+      "ROTAT": [0.0, -6.0, 88.0],
+      "SCALE": [11.6, 1.00, 1.00]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "charred_trunk",
+      "TRANS": [-1.7, 10.2, 0.7],
+      "ROTAT": [0.0, 12.0, 24.0],
+      "SCALE": [4.4, 0.85, 0.85]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "charred_trunk",
+      "TRANS": [-5.2, 11.1, 0.6],
+      "ROTAT": [0.0, -8.0, 153.0],
+      "SCALE": [4.8, 0.80, 0.80]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "trunk",
+      "TRANS": [7.0, 9.5, 0.3],
+      "ROTAT": [0.0, 9.0, 31.0],
+      "SCALE": [4.5, 0.78, 0.78]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "trunk",
+      "TRANS": [3.5, 11.5, 0.2],
+      "ROTAT": [0.0, -6.0, 148.0],
+      "SCALE": [4.2, 0.76, 0.76]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "charred_trunk",
+      "TRANS": [-10.8, 8.1, 1.5],
+      "ROTAT": [0.0, 4.0, 28.0],
+      "SCALE": [3.8, 0.72, 0.72]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "trunk",
+      "TRANS": [-13.3, 10.0, 1.4],
+      "ROTAT": [0.0, -5.0, 151.0],
+      "SCALE": [3.5, 0.70, 0.70]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "charred_trunk",
+      "TRANS": [-6.6, 9.2, -0.9],
+      "ROTAT": [0.0, 7.0, 35.0],
+      "SCALE": [4.0, 0.72, 0.72]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "charred_trunk",
+      "TRANS": [-9.4, 12.0, -1.0],
+      "ROTAT": [0.0, -5.0, 146.0],
+      "SCALE": [4.2, 0.70, 0.70]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "trunk",
+      "TRANS": [10.9, 8.0, -2.8],
+      "ROTAT": [0.0, 6.0, 32.0],
+      "SCALE": [3.9, 0.68, 0.68]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "charred_trunk",
+      "TRANS": [8.0, 10.8, -2.9],
+      "ROTAT": [0.0, -7.0, 149.0],
+      "SCALE": [4.0, 0.68, 0.68]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "charred_trunk",
+      "TRANS": [-12.0, 0.30, 2.4],
+      "ROTAT": [0.0, 14.0, 8.0],
+      "SCALE": [5.2, 0.38, 0.38]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "trunk",
+      "TRANS": [-7.0, 0.24, 1.7],
+      "ROTAT": [0.0, -18.0, -6.0],
+      "SCALE": [4.4, 0.34, 0.34]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "charred_trunk",
+      "TRANS": [-1.5, 0.28, 2.2],
+      "ROTAT": [0.0, 9.0, 5.0],
+      "SCALE": [5.0, 0.36, 0.36]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "trunk",
+      "TRANS": [4.6, 0.25, 1.5],
+      "ROTAT": [0.0, -15.0, -7.0],
+      "SCALE": [4.8, 0.34, 0.34]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_log.obj",
+      "MATERIAL": "charred_trunk",
+      "TRANS": [10.8, 0.29, 2.1],
+      "ROTAT": [0.0, 20.0, 6.0],
+      "SCALE": [5.4, 0.37, 0.37]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "burn_scar",
+      "TRANS": [-12.4, 0.025, 6.7],
+      "ROTAT": [0.0, 11.0, 0.0],
+      "SCALE": [7.0, 0.10, 2.5]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "ash",
+      "TRANS": [-6.4, 0.040, 6.25],
+      "ROTAT": [0.0, -17.0, 0.0],
+      "SCALE": [5.8, 0.085, 2.0]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "burn_scar",
+      "TRANS": [-0.7, 0.028, 6.95],
+      "ROTAT": [0.0, 24.0, 0.0],
+      "SCALE": [6.6, 0.095, 2.3]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "ash",
+      "TRANS": [5.8, 0.038, 6.45],
+      "ROTAT": [0.0, -13.0, 0.0],
+      "SCALE": [5.4, 0.080, 1.9]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "burn_scar",
+      "TRANS": [11.6, 0.026, 6.9],
+      "ROTAT": [0.0, 19.0, 0.0],
+      "SCALE": [6.4, 0.090, 2.2]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "hot_coal",
+      "TRANS": [-12.2, 0.18, 6.55],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [0.42, 0.24, 0.34]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "hot_coal",
+      "TRANS": [-6.7, 0.16, 6.18],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [0.34, 0.20, 0.28]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "hot_coal",
+      "TRANS": [-1.4, 0.20, 6.82],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [0.46, 0.25, 0.36]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "hot_coal",
+      "TRANS": [4.1, 0.17, 6.36],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [0.36, 0.22, 0.30]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "hot_coal",
+      "TRANS": [9.7, 0.19, 6.72],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [0.40, 0.23, 0.32]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "ember",
+      "TRANS": [-11.3, 2.05, 7.20],
+      "ROTAT": [0.0, 0.0, -8.0],
+      "SCALE": [0.095, 0.18, 0.095]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "ember",
+      "TRANS": [-7.0, 3.18, 8.05],
+      "ROTAT": [0.0, 0.0, 12.0],
+      "SCALE": [0.075, 0.15, 0.075]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "ember",
+      "TRANS": [-2.8, 2.62, 7.65],
+      "ROTAT": [0.0, 0.0, -17.0],
+      "SCALE": [0.085, 0.17, 0.085]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "ember",
+      "TRANS": [1.5, 4.20, 9.15],
+      "ROTAT": [0.0, 0.0, 9.0],
+      "SCALE": [0.065, 0.14, 0.065]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "ember",
+      "TRANS": [5.2, 3.42, 8.45],
+      "ROTAT": [0.0, 0.0, -11.0],
+      "SCALE": [0.080, 0.16, 0.080]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "ember",
+      "TRANS": [8.6, 5.15, 10.25],
+      "ROTAT": [0.0, 0.0, 15.0],
+      "SCALE": [0.058, 0.13, 0.058]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "ember",
+      "TRANS": [12.3, 2.82, 7.95],
+      "ROTAT": [0.0, 0.0, -13.0],
+      "SCALE": [0.070, 0.15, 0.070]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "ember",
+      "TRANS": [6.9, 6.85, 12.10],
+      "ROTAT": [0.0, 0.0, 7.0],
+      "SCALE": [0.048, 0.11, 0.048]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "combustion",
+      "TRANS": [0.0, 11.80, 9.40],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [36.0, 24.0, 12.0],
+      "VOLUME_GRID": {
+        "PRESET": "Wildfire",
+        "RESOLUTION": [192, 160, 160],
+        "SEED": 211,
+        "WIND": [0.58, 0.060, 0.28],
+        "DENSITY_SCALE": 1.32,
+        "SOOT_SCALE": 1.65,
+        "REACTION_SCALE": 1.00,
+        "TURBULENCE_SCALE": 1.72,
+        "BUOYANCY_SCALE": 0.98,
+        "SMOKE_ADVECTION": 2.25
+      }
+    }
+  ]
+}

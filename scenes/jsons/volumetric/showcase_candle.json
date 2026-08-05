@@ -1,0 +1,155 @@
+{
+  "Materials": {
+    "table": {
+      "TYPE": "Microfacet",
+      "RGB": [0.065, 0.028, 0.012],
+      "SPEC_RGB": [0.42, 0.26, 0.16],
+      "ROUGHNESS": 0.50,
+      "IOR": 1.48
+    },
+    "backdrop": {
+      "TYPE": "Diffuse",
+      "RGB": [0.010, 0.008, 0.009]
+    },
+    "holder": {
+      "TYPE": "Microfacet",
+      "RGB": [0.025, 0.020, 0.018],
+      "SPEC_RGB": [0.78, 0.70, 0.62],
+      "ROUGHNESS": 0.20,
+      "IOR": 1.52
+    },
+    "wax": {
+      "TYPE": "Microfacet",
+      "RGB": [0.62, 0.36, 0.12],
+      "SPEC_RGB": [1.0, 0.90, 0.72],
+      "ROUGHNESS": 0.42,
+      "IOR": 1.44
+    },
+    "melt": {
+      "TYPE": "Microfacet",
+      "RGB": [0.56, 0.31, 0.10],
+      "SPEC_RGB": [1.0, 0.88, 0.62],
+      "ROUGHNESS": 0.14,
+      "IOR": 1.44
+    },
+    "wick": {
+      "TYPE": "Diffuse",
+      "RGB": [0.006, 0.004, 0.003]
+    },
+    "combustion": {
+      "TYPE": "Medium",
+      "FIELD_MODEL": "SparseGrid",
+      "SIGMA_A": [0.10, 0.12, 0.15],
+      "SIGMA_S": [0.08, 0.09, 0.10],
+      "SOOT_SIGMA_A": [1.45, 1.20, 0.90],
+      "SOOT_SIGMA_S": [0.018, 0.020, 0.022],
+      "FLAME_ABSORPTION_SCALE": 0.025,
+      "G": 0.32,
+      "DENSITY": 0.90,
+      "HETEROGENEOUS": true,
+      "TEMPERATURE_SCALE": 0.94,
+      "SOOT_EMISSION_MULTIPLIER": 0.38,
+      "EMISSION": 4.2,
+      "EMISSION_RGB": [1.0, 1.0, 1.0],
+      "SPECTRUM": {"BLACKBODY": 1800.0}
+    }
+  },
+  "Integrator": {
+    "VOLUME_QUALITY": "Reference",
+    "VOLUME_DEBUG": "None",
+    "VOLUME_MAX_SCATTER_DEPTH": 8,
+    "VOLUME_STATS": false
+  },
+  "Environment": {
+    "TEXTURE_PATH": "../../textures/env/christmas_photo_studio_01_2k.hdr",
+    "INTENSITY": 0.040,
+    "ROTATION": 120.0
+  },
+  "Lights": [
+    {
+      "TYPE": "Point",
+      "POSITION": [3.5, 4.5, 5.5],
+      "RGB": [0.58, 0.42, 0.27],
+      "INTENSITY": 220.0
+    }
+  ],
+  "Camera": {
+    "RES": [800, 600],
+    "FOVY": 25.0,
+    "ITERATIONS": 1536,
+    "DEPTH": 32,
+    "FILE": "showcase_candle",
+    "EXPOSURE": -1.10,
+    "TONEMAP": true,
+    "EYE": [2.50, 3.35, 5.70],
+    "LOOKAT": [0.0, 2.95, 0.0],
+    "UP": [0.0, 1.0, 0.0],
+    "FOCAL_DISTANCE": 6.22,
+    "LENS_RADIUS": 0.015
+  },
+  "Objects": [
+    {
+      "TYPE": "cube",
+      "MATERIAL": "table",
+      "TRANS": [0.0, -0.25, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [14.0, 0.5, 14.0]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "backdrop",
+      "TRANS": [0.0, 3.5, -4.5],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [14.0, 8.0, 0.2]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_candle_cylinder.obj",
+      "MATERIAL": "holder",
+      "TRANS": [0.0, 0.07, 0.0],
+      "ROTAT": [0.0, 0.0, 90.0],
+      "SCALE": [0.14, 11.7, 11.7]
+    },
+    {
+      "TYPE": "mesh",
+      "MESH_PATH": "../../meshes/obj/showcase_candle_cylinder.obj",
+      "MATERIAL": "wax",
+      "TRANS": [0.0, 1.36, 0.0],
+      "ROTAT": [0.0, 0.0, 90.0],
+      "SCALE": [2.5, 6.25, 6.25]
+    },
+    {
+      "TYPE": "sphere",
+      "MATERIAL": "melt",
+      "TRANS": [0.0, 2.64, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [1.16, 0.08, 1.16]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "wick",
+      "TRANS": [0.0, 2.80, 0.0],
+      "ROTAT": [0.0, 0.0, -4.0],
+      "SCALE": [0.075, 0.38, 0.075]
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "combustion",
+      "TRANS": [0.0, 4.05, -0.15],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [2.40, 3.40, 2.20],
+      "VOLUME_GRID": {
+        "PRESET": "Candle",
+        "RESOLUTION": [48, 96, 48],
+        "SEED": 11,
+        "WIND": [0.018, 0.145, -0.035],
+        "DENSITY_SCALE": 0.78,
+        "SOOT_SCALE": 0.34,
+        "REACTION_SCALE": 1.05,
+        "TURBULENCE_SCALE": 0.62,
+        "BUOYANCY_SCALE": 1.08,
+        "SMOKE_ADVECTION": 1.10
+      }
+    }
+  ]
+}

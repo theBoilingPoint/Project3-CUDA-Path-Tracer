@@ -10,6 +10,7 @@
 
 // Spectral-vs-RGB transport switch, Spectrum type and SampledWavelengths.
 #include "../render/spectral.h"
+#include "volumeGrid.h"
 
 #define BACKGROUND_COLOR (glm::vec3(0.0f))
 
@@ -126,6 +127,35 @@ struct MaterialIDs {
     int bumpTextureID;
 };
 
+// Device-facing view of one compact sparse combustion grid. Bricks contain
+// 8^3 interpolation cells and a positive 9^3 sample halo, so every trilinear
+// lookup stays inside one contiguous allocation.
+struct SparseVolumeGridDevice {
+    int valid;
+    glm::ivec3 cellResolution;
+    glm::ivec3 brickResolution;
+    int activeBrickCount;
+    glm::vec3 localBoundsMin;
+    glm::vec3 localBoundsMax;
+    int brickSize;
+    float cellVolume;
+    float totalEmissionPower;
+    float localToWorldVolume;
+    const int *pageTable;
+    const VolumeBrickMeta *bricks;
+    // CUDA renders pack every 9^3 brick (including its interpolation halo)
+    // into a compact 3-D texture atlas. Two hardware-filtered float4 fetches
+    // replace sixteen uncached scalar-vector loads and the manual trilerps.
+    // Host validation keeps using the pointer fallback below.
+    glm::ivec3 textureBrickResolution;
+    cudaTextureObject_t combustionTexture;
+    cudaTextureObject_t thermalFlowTexture;
+    const glm::vec4 *combustionSamples;
+    const glm::vec4 *thermalFlowSamples;
+    const float *brickEmissionCdf;
+    const float *cellEmissionCdf;
+};
+
 // Device-facing geometry record. Holds only what the intersection kernels
 // actually read: the type tag, the mesh device pointers (dereferenced only when
 // type == MESH), the transform matrices, and the material/texture indices.
@@ -149,6 +179,17 @@ struct Geom {
     } transform;
 
     MaterialIDs material;
+    // Host-precomputed world-space surface area (exact for cubes/meshes,
+    // Knud-Thomsen proxy for affine spheres) and the discrete probability
+    // used to select this geom when it is an area emitter. The PMF is stored
+    // on both the scene geom and its light-array copy so hit-light MIS and NEE
+    // use exactly the same selection strategy.
+    float surfaceArea;
+    float areaLightSelectionPmf;
+    // Host index into Scene::volumeGrids; -1 for ordinary geometry and legacy
+    // procedural media. The device view is patched during upload.
+    int volumeGridId;
+    SparseVolumeGridDevice volumeGrid;
 };
 
 struct Material {
@@ -184,6 +225,15 @@ struct Material {
     int noiseSeed;      // deterministic offset for procedural density variation
     int mediumProfile;  // MediumProfile: shape of the procedural density field
 
+    // Independent soot optics and grid emission controls. Non-negative linear
+    // combinations keep every per-brick majorant conservative.
+    glm::vec3 sootSigmaA;
+    glm::vec3 sootSigmaS;
+    float flameAbsorptionScale;
+    float temperatureScale;
+    float sootEmission;
+    int mediumFieldModel;
+
     // Emissive media (fire): `color * emittance` is emitted radiance per unit
     // distance at peak procedural density. spectrumType/blackbody fields above
     // select the spectral shape, exactly as for surface emitters.
@@ -196,6 +246,14 @@ enum MediumProfile {
     MEDIUM_PROFILE_PLUME,   // continuous rising smoke column + wispy breakup
     MEDIUM_PROFILE_FLAME,   // tapered, forked, emissive flame tongues
     MEDIUM_PROFILE_FOG,     // low-frequency, height-varying atmospheric bank
+    MEDIUM_PROFILE_CANDLE,  // narrow laminar wick flame with a dark lower core
+    MEDIUM_PROFILE_FIRE_FRONT, // many turbulent fuel-rooted flame tongues
+    MEDIUM_PROFILE_SMOKE_FRONT, // merged multi-source convective smoke
+};
+
+enum MediumFieldModel {
+    MEDIUM_FIELD_PROCEDURAL = 0,
+    MEDIUM_FIELD_SPARSE_GRID = 1,
 };
 
 /****** For Texture Loading ******/
@@ -273,6 +331,47 @@ struct Camera {
     int toneMap;    // 1: ACES fitted curve + linear-to-sRGB output transform
 };
 
+enum VolumeQualityMode {
+    VOLUME_QUALITY_DEBUG = 0,
+    VOLUME_QUALITY_REFERENCE = 1,
+};
+
+enum VolumeDebugMode {
+    VOLUME_DEBUG_NONE = 0,
+    VOLUME_DEBUG_TEMPERATURE,
+    VOLUME_DEBUG_DENSITY,
+    VOLUME_DEBUG_FUEL,
+    VOLUME_DEBUG_SOOT,
+    VOLUME_DEBUG_REACTION,
+    VOLUME_DEBUG_EMISSION,
+    VOLUME_DEBUG_SIGMA_A,
+    VOLUME_DEBUG_SIGMA_S,
+    VOLUME_DEBUG_SIGMA_T,
+    VOLUME_DEBUG_VELOCITY,
+    VOLUME_DEBUG_MAJORANT,
+    VOLUME_DEBUG_NULL_RATE,
+    VOLUME_DEBUG_EVENT_COUNT,
+    VOLUME_DEBUG_DIRECT_VOLUME,
+    VOLUME_DEBUG_INDIRECT_VOLUME,
+    VOLUME_DEBUG_SURFACE_FIRE,
+};
+
+struct VolumeIntegratorSettings {
+    int quality = VOLUME_QUALITY_REFERENCE;
+    int debugMode = VOLUME_DEBUG_NONE;
+    int maxScatteringDepth = 8;
+    int reportTrackingStats = 1;
+};
+
+struct VolumeTrackingStats {
+    unsigned long long brickVisits;
+    unsigned long long emptyBrickSkips;
+    unsigned long long nullCollisions;
+    unsigned long long realCollisions;
+    unsigned long long majorantViolations;
+    unsigned long long trackingOverflows;
+};
+
 struct RenderState {
     Camera camera;
     unsigned int iterations;
@@ -310,6 +409,9 @@ struct PathSegment {
     // through (-1 = vacuum). Toggled when crossing a MEDIUM-material geom's
     // null boundary; medium distance sampling runs whenever this is >= 0.
     int mediumGeom;
+    // Number of real (non-null) volume-scattering vertices on this path.
+    // Crossing a medium boundary does not increment it.
+    int volumeScatteringDepth;
 };
 
 // Use with a corresponding PathSegment to do:

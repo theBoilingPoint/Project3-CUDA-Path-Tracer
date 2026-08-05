@@ -54,6 +54,9 @@ class Scene {
 
     vector<Geom> geoms;
     vector<Geom> lights;
+    // Normalized cumulative distribution over `lights`, weighted by an
+    // emitted-power proxy (surface area * luminance). One entry per light.
+    vector<float> areaLightCdf;
     // Delta (point/directional) lights, parsed from an optional "Lights" block.
     vector<DeltaLight> deltaLights;
     // Host-side mesh arrays, parallel to `geoms`/`lights`. `geomMeshData` owns
@@ -61,6 +64,10 @@ class Scene {
     // geoms), so only `geomMeshData` is freed.
     vector<MeshData> geomMeshData;
     vector<MeshData> lightMeshData;
+    // Host-owned sparse combustion grids referenced by Geom::volumeGridId.
+    // These remain alive for camera resets because deviceSceneInit may upload
+    // them more than once during an interactive session.
+    vector<HostSparseVolumeGrid> volumeGrids;
     vector<Material> materials;
     vector<tuple<glm::vec4 *, glm::ivec2>> albedoTextures;
     vector<tuple<glm::vec4 *, glm::ivec2>> normalTextures;
@@ -83,6 +90,8 @@ class Scene {
     // device in deviceSceneInit.
     std::vector<float> envConditionalCdf; // per row: h * (w + 1) entries
     std::vector<float> envMarginalCdf;    // over rows: (h + 1) entries
+
+    VolumeIntegratorSettings volumeIntegrator;
 
     RenderState state;
 };

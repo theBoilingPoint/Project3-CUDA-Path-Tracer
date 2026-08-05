@@ -1,10 +1,155 @@
 #include "scene.h"
 
+#include <cmath>
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
 
 #include "spectrumData.h" // illuminantRGB / blackbodyLuminanceNorm
 
 #define USE_SELF_LOADED_TEXTURES 1
+
+static int parseVolumeDebugMode(const std::string &name) {
+    if (name == "None")
+        return VOLUME_DEBUG_NONE;
+    if (name == "Temperature")
+        return VOLUME_DEBUG_TEMPERATURE;
+    if (name == "Density")
+        return VOLUME_DEBUG_DENSITY;
+    if (name == "Fuel")
+        return VOLUME_DEBUG_FUEL;
+    if (name == "Soot")
+        return VOLUME_DEBUG_SOOT;
+    if (name == "Reaction")
+        return VOLUME_DEBUG_REACTION;
+    if (name == "Emission")
+        return VOLUME_DEBUG_EMISSION;
+    if (name == "SigmaA")
+        return VOLUME_DEBUG_SIGMA_A;
+    if (name == "SigmaS")
+        return VOLUME_DEBUG_SIGMA_S;
+    if (name == "SigmaT")
+        return VOLUME_DEBUG_SIGMA_T;
+    if (name == "Velocity")
+        return VOLUME_DEBUG_VELOCITY;
+    if (name == "Majorant")
+        return VOLUME_DEBUG_MAJORANT;
+    if (name == "NullRate")
+        return VOLUME_DEBUG_NULL_RATE;
+    if (name == "EventCount")
+        return VOLUME_DEBUG_EVENT_COUNT;
+    if (name == "DirectVolume")
+        return VOLUME_DEBUG_DIRECT_VOLUME;
+    if (name == "IndirectVolume")
+        return VOLUME_DEBUG_INDIRECT_VOLUME;
+    if (name == "SurfaceFire")
+        return VOLUME_DEBUG_SURFACE_FIRE;
+    std::cerr << "Unknown volume DEBUG mode \"" << name << "\"." << std::endl;
+    exit(-1);
+}
+
+static CombustionPreset parseCombustionPreset(const std::string &name) {
+    if (name == "Candle")
+        return CombustionPreset::Candle;
+    if (name == "WoodFire")
+        return CombustionPreset::WoodFire;
+    if (name == "Wildfire")
+        return CombustionPreset::Wildfire;
+    std::cerr << "Unknown VOLUME_GRID PRESET \"" << name
+              << "\" (expected Candle, WoodFire, or Wildfire)." << std::endl;
+    exit(-1);
+}
+
+static void printVolumeFieldSummary(const HostSparseVolumeGrid &grid) {
+    float maxDensity = 0.0f;
+    float maxSoot = 0.0f;
+    float maxReaction = 0.0f;
+    float maxTemperature = 0.0f;
+    glm::vec3 reactionMin(1.0f);
+    glm::vec3 reactionMax(0.0f);
+    bool hasReaction = false;
+    for (const VolumeBrickMeta &brick : grid.bricks) {
+        maxDensity = std::max(maxDensity, brick.maxDensity);
+        maxSoot = std::max(maxSoot, brick.maxSoot);
+        maxReaction = std::max(maxReaction, brick.maxReaction);
+        maxTemperature = std::max(maxTemperature, brick.maxTemperature);
+        for (int z = 0; z < kVolumeBrickSampleSize; ++z) {
+            for (int y = 0; y < kVolumeBrickSampleSize; ++y) {
+                for (int x = 0; x < kVolumeBrickSampleSize; ++x) {
+                    const int local =
+                        x + kVolumeBrickSampleSize *
+                                (y + kVolumeBrickSampleSize * z);
+                    const glm::vec4 combustion =
+                        grid.combustionSamples[brick.sampleOffset + local];
+                    if (combustion.w <= 0.01f) {
+                        continue;
+                    }
+                    const glm::vec3 q =
+                        glm::vec3(brick.brickX * grid.brickSize + x,
+                                  brick.brickY * grid.brickSize + y,
+                                  brick.brickZ * grid.brickSize + z) /
+                        glm::vec3(grid.cellResolution);
+                    reactionMin = glm::min(reactionMin, q);
+                    reactionMax = glm::max(reactionMax, q);
+                    hasReaction = true;
+                }
+            }
+        }
+    }
+    printf("Fields: max density %.3f, soot %.3f, reaction %.3f, "
+           "temperature %.0f K",
+           maxDensity, maxSoot, maxReaction, maxTemperature);
+    if (hasReaction) {
+        printf(", reaction q-bounds [%.2f %.2f %.2f]-[%.2f %.2f %.2f]",
+               reactionMin.x, reactionMin.y, reactionMin.z, reactionMax.x,
+               reactionMax.y, reactionMax.z);
+    }
+    printf("\n");
+}
+
+static float luminance(const glm::vec3 &rgb) {
+    return glm::dot(rgb, glm::vec3(0.2126f, 0.7152f, 0.0722f));
+}
+
+// Compute once on the host instead of re-summing mesh triangles in every NEE
+// and hit-light MIS evaluation. The affine-sphere value is only an importance
+// proxy; its conditional sample PDF is evaluated with the exact area
+// Jacobian on the GPU.
+static float geomSurfaceArea(const Geom &geom, const MeshData &mesh) {
+    const glm::vec3 ex = glm::vec3(geom.transform.transform[0]);
+    const glm::vec3 ey = glm::vec3(geom.transform.transform[1]);
+    const glm::vec3 ez = glm::vec3(geom.transform.transform[2]);
+    if (geom.type == CUBE) {
+        return 2.0f * (glm::length(glm::cross(ey, ez)) +
+                       glm::length(glm::cross(ex, ez)) +
+                       glm::length(glm::cross(ex, ey)));
+    }
+    if (geom.type == SPHERE) {
+        const float a = 0.5f * glm::length(ex);
+        const float b = 0.5f * glm::length(ey);
+        const float c = 0.5f * glm::length(ez);
+        constexpr float p = 1.6075f;
+        const float mean =
+            (std::pow(a * b, p) + std::pow(a * c, p) +
+             std::pow(b * c, p)) /
+            3.0f;
+        return 4.0f * glm::pi<float>() * std::pow(mean, 1.0f / p);
+    }
+    if (geom.type == MESH && mesh.triangles != nullptr) {
+        float area = 0.0f;
+        for (int i = 0; i < mesh.numTriangles; ++i) {
+            const Triangle &triangle = mesh.triangles[i];
+            const glm::vec3 p0 = glm::vec3(
+                geom.transform.transform * glm::vec4(triangle.points[0], 1));
+            const glm::vec3 p1 = glm::vec3(
+                geom.transform.transform * glm::vec4(triangle.points[1], 1));
+            const glm::vec3 p2 = glm::vec3(
+                geom.transform.transform * glm::vec4(triangle.points[2], 1));
+            area += 0.5f * glm::length(glm::cross(p1 - p0, p2 - p0));
+        }
+        return area;
+    }
+    return 0.0f;
+}
 
 // Parse an optional "SPECTRUM" field on an emitter or delta light:
 //   "SPECTRUM": "D65" | "A" | "E"          (named illuminants)
@@ -214,6 +359,35 @@ void Scene::loadFromJSON(const std::string &jsonName) {
     std::ifstream f(jsonName);
     json data = json::parse(f);
 
+    // Volume integrator controls are scene-wide so diagnostic AOVs and the
+    // reference/debug transport switch consume exactly the same stored fields.
+    if (data.contains("Integrator")) {
+        const auto &integrator = data["Integrator"];
+        const std::string quality =
+            integrator.value("VOLUME_QUALITY", "Reference");
+        if (quality == "Reference") {
+            volumeIntegrator.quality = VOLUME_QUALITY_REFERENCE;
+        } else if (quality == "Debug") {
+            volumeIntegrator.quality = VOLUME_QUALITY_DEBUG;
+        } else {
+            std::cerr << "Integrator VOLUME_QUALITY must be \"Reference\" or "
+                         "\"Debug\"."
+                      << std::endl;
+            exit(-1);
+        }
+        volumeIntegrator.debugMode =
+            parseVolumeDebugMode(integrator.value("VOLUME_DEBUG", "None"));
+        volumeIntegrator.maxScatteringDepth =
+            integrator.value("VOLUME_MAX_SCATTER_DEPTH", 8);
+        volumeIntegrator.reportTrackingStats =
+            integrator.value("VOLUME_STATS", true) ? 1 : 0;
+        if (volumeIntegrator.maxScatteringDepth < 1) {
+            std::cerr << "Integrator VOLUME_MAX_SCATTER_DEPTH must be >= 1."
+                      << std::endl;
+            exit(-1);
+        }
+    }
+
     // Reading materials
     const auto &materialsData = data["Materials"];
     std::unordered_map<std::string, uint32_t> MatNameToID;
@@ -330,6 +504,12 @@ void Scene::loadFromJSON(const std::string &jsonName) {
             newMaterial.type = MEDIUM;
             newMaterial.sigmaA = glm::vec3(0.1f);
             newMaterial.sigmaS = glm::vec3(1.0f);
+            newMaterial.sootSigmaA = glm::vec3(1.2f, 1.0f, 0.82f);
+            newMaterial.sootSigmaS = glm::vec3(0.02f);
+            newMaterial.flameAbsorptionScale = 0.04f;
+            newMaterial.temperatureScale = 1.0f;
+            newMaterial.sootEmission = 0.25f;
+            newMaterial.mediumFieldModel = MEDIUM_FIELD_PROCEDURAL;
             if (p.contains("SIGMA_A")) {
                 const auto &sa = p["SIGMA_A"];
                 newMaterial.sigmaA = glm::vec3(sa[0], sa[1], sa[2]);
@@ -344,6 +524,38 @@ void Scene::loadFromJSON(const std::string &jsonName) {
             newMaterial.noiseScale = p.value("NOISE_SCALE", 4.0f);
             newMaterial.noiseOctaves = p.value("NOISE_OCTAVES", 4);
             newMaterial.noiseSeed = p.value("NOISE_SEED", 0);
+
+            if (p.contains("FIELD_MODEL")) {
+                const std::string fieldModel = p["FIELD_MODEL"];
+                if (fieldModel == "Procedural") {
+                    newMaterial.mediumFieldModel = MEDIUM_FIELD_PROCEDURAL;
+                } else if (fieldModel == "SparseGrid") {
+                    newMaterial.mediumFieldModel = MEDIUM_FIELD_SPARSE_GRID;
+                    newMaterial.heterogeneous = 1;
+                } else {
+                    std::cerr
+                        << "Medium FIELD_MODEL must be \"Procedural\" or "
+                           "\"SparseGrid\"."
+                        << std::endl;
+                    exit(-1);
+                }
+            }
+            if (p.contains("SOOT_SIGMA_A")) {
+                const auto &sa = p["SOOT_SIGMA_A"];
+                newMaterial.sootSigmaA =
+                    glm::vec3(sa[0], sa[1], sa[2]);
+            }
+            if (p.contains("SOOT_SIGMA_S")) {
+                const auto &ss = p["SOOT_SIGMA_S"];
+                newMaterial.sootSigmaS =
+                    glm::vec3(ss[0], ss[1], ss[2]);
+            }
+            newMaterial.flameAbsorptionScale =
+                p.value("FLAME_ABSORPTION_SCALE", 0.04f);
+            newMaterial.temperatureScale =
+                p.value("TEMPERATURE_SCALE", 1.0f);
+            newMaterial.sootEmission =
+                p.value("SOOT_EMISSION_MULTIPLIER", 0.25f);
 
             // Optional continuous volume emission. This is deliberately
             // separate from SIGMA_A/SIGMA_S: EMISSION is a source term per
@@ -361,9 +573,11 @@ void Scene::loadFromJSON(const std::string &jsonName) {
             }
 
             // Density-field shape (heterogeneous only): "Fbm" (default),
-            // "Cloud" (cumulus billows), "Plume" (rising smoke column), or
-            // "Flame" (tapered, forked fire), or "Fog" (soft atmospheric
-            // height layer).
+            // "Cloud" (cumulus billows), "Plume" (single rising smoke
+            // column), "Flame" (tapered, forked fire), "Candle" (laminar
+            // wick flame), "FireFront" (multi-source turbulent flames),
+            // "SmokeFront" (merged convective smoke), or "Fog" (soft
+            // atmospheric height layer).
             newMaterial.mediumProfile = MEDIUM_PROFILE_FBM;
             if (p.contains("PROFILE")) {
                 const std::string prof = p["PROFILE"];
@@ -373,14 +587,28 @@ void Scene::loadFromJSON(const std::string &jsonName) {
                     newMaterial.mediumProfile = MEDIUM_PROFILE_PLUME;
                 } else if (prof == "Flame") {
                     newMaterial.mediumProfile = MEDIUM_PROFILE_FLAME;
+                } else if (prof == "Candle") {
+                    newMaterial.mediumProfile = MEDIUM_PROFILE_CANDLE;
+                } else if (prof == "FireFront") {
+                    newMaterial.mediumProfile = MEDIUM_PROFILE_FIRE_FRONT;
+                } else if (prof == "SmokeFront") {
+                    newMaterial.mediumProfile = MEDIUM_PROFILE_SMOKE_FRONT;
                 } else if (prof == "Fog") {
                     newMaterial.mediumProfile = MEDIUM_PROFILE_FOG;
                 } else if (prof != "Fbm") {
                     printf("Unknown medium PROFILE \"%s\" (expected \"Fbm\", "
-                           "\"Cloud\", \"Plume\", \"Flame\", or \"Fog\").\n",
+                           "\"Cloud\", \"Plume\", \"Flame\", \"Candle\", "
+                           "\"FireFront\", \"SmokeFront\", or \"Fog\").\n",
                            prof.c_str());
                     exit(-1);
                 }
+            }
+            if (p.contains("PROFILE") &&
+                newMaterial.mediumFieldModel == MEDIUM_FIELD_SPARSE_GRID) {
+                std::cerr << "SparseGrid media use object VOLUME_GRID fields "
+                             "and cannot also select a procedural PROFILE."
+                          << std::endl;
+                exit(-1);
             }
             if (p.contains("PROFILE") && !newMaterial.heterogeneous) {
                 printf("Medium PROFILE requires HETEROGENEOUS=true; otherwise "
@@ -394,10 +622,18 @@ void Scene::loadFromJSON(const std::string &jsonName) {
             }
             if (glm::any(glm::lessThan(newMaterial.sigmaA, glm::vec3(0.0f))) ||
                 glm::any(glm::lessThan(newMaterial.sigmaS, glm::vec3(0.0f))) ||
+                glm::any(glm::lessThan(newMaterial.sootSigmaA,
+                                       glm::vec3(0.0f))) ||
+                glm::any(glm::lessThan(newMaterial.sootSigmaS,
+                                       glm::vec3(0.0f))) ||
                 newMaterial.densityScale < 0.0f ||
-                newMaterial.emittance < 0.0f) {
-                printf("Medium SIGMA_A, SIGMA_S, DENSITY, and EMISSION must "
-                       "be non-negative.\n");
+                newMaterial.emittance < 0.0f ||
+                newMaterial.flameAbsorptionScale < 0.0f ||
+                newMaterial.temperatureScale <= 0.0f ||
+                newMaterial.sootEmission < 0.0f) {
+                printf("Medium optical coefficients, DENSITY, EMISSION, and "
+                       "grid emission controls must be non-negative "
+                       "(TEMPERATURE_SCALE must be positive).\n");
                 exit(-1);
             }
             if (newMaterial.noiseScale <= 0.0f ||
@@ -407,6 +643,19 @@ void Scene::loadFromJSON(const std::string &jsonName) {
                        "be in [1, 8].\n");
                 exit(-1);
             }
+#if SPECTRAL
+            if (newMaterial.mediumFieldModel ==
+                    MEDIUM_FIELD_SPARSE_GRID &&
+                newMaterial.emittance > 0.0f &&
+                newMaterial.spectrumType != SPECTRUM_BLACKBODY) {
+                std::cerr
+                    << "Emissive SparseGrid media require "
+                       "SPECTRUM {\"BLACKBODY\": kelvin}; voxel temperature "
+                       "is the primary color and HDR-power driver."
+                    << std::endl;
+                exit(-1);
+            }
+#endif
         }
 
         MatNameToID[name] = materials.size();
@@ -545,11 +794,12 @@ void Scene::loadFromJSON(const std::string &jsonName) {
     // Reading objects
     const auto &objectsData = data["Objects"];
     int numOfFaces = 0;
+    std::vector<int> areaLightGeomIndices;
     for (const auto &p : objectsData) {
         const auto &type = p["TYPE"];
         const std::string &mat = p["MATERIAL"];
 
-        Geom newGeom;
+        Geom newGeom{};
 
         // Have to initialize the material IDs to -1, otherwise the default
         // value for int is 0 N we will have segmentation fault in CUDA
@@ -562,6 +812,8 @@ void Scene::loadFromJSON(const std::string &jsonName) {
         newGeom.geometry.numTriangles = 0;
         newGeom.geometry.devTriangles = nullptr;
         newGeom.geometry.devNodes = nullptr;
+        newGeom.volumeGridId = -1;
+        newGeom.volumeGrid.valid = 0;
         MeshData newMeshData;
 
         if (type == "cube") {
@@ -725,6 +977,96 @@ void Scene::loadFromJSON(const std::string &jsonName) {
             glm::inverse(newGeom.transform.transform);
         newGeom.transform.invTranspose =
             glm::inverseTranspose(newGeom.transform.transform);
+        newGeom.surfaceArea = geomSurfaceArea(newGeom, newMeshData);
+
+        const Material &objectMaterial =
+            materials[newGeom.material.materialId];
+        if (p.contains("VOLUME_GRID")) {
+            if (objectMaterial.type != MEDIUM ||
+                objectMaterial.mediumFieldModel !=
+                    MEDIUM_FIELD_SPARSE_GRID ||
+                newGeom.type != CUBE) {
+                std::cerr
+                    << "VOLUME_GRID requires a cube using a Medium material "
+                       "with FIELD_MODEL \"SparseGrid\"."
+                    << std::endl;
+                exit(-1);
+            }
+            const auto &vg = p["VOLUME_GRID"];
+            if (!vg.is_object() || !vg.contains("PRESET")) {
+                std::cerr << "VOLUME_GRID requires a PRESET (Candle, "
+                             "WoodFire, or Wildfire)."
+                          << std::endl;
+                exit(-1);
+            }
+            const CombustionPreset preset =
+                parseCombustionPreset(vg["PRESET"]);
+            VolumeGridBuildSettings settings =
+                defaultVolumeGridBuildSettings(preset);
+            if (vg.contains("RESOLUTION")) {
+                const auto &r = vg["RESOLUTION"];
+                settings.cellResolution =
+                    glm::ivec3(r[0], r[1], r[2]);
+            }
+            if (vg.contains("WIND")) {
+                const auto &w = vg["WIND"];
+                settings.wind = glm::vec3(w[0], w[1], w[2]);
+            }
+            settings.seed = vg.value("SEED", settings.seed);
+            settings.activeThreshold =
+                vg.value("ACTIVE_THRESHOLD", settings.activeThreshold);
+            settings.densityScale =
+                vg.value("DENSITY_SCALE", settings.densityScale);
+            settings.sootScale =
+                vg.value("SOOT_SCALE", settings.sootScale);
+            settings.fuelScale =
+                vg.value("FUEL_SCALE", settings.fuelScale);
+            settings.temperatureScale =
+                vg.value("FIELD_TEMPERATURE_SCALE",
+                         settings.temperatureScale);
+            settings.reactionScale =
+                vg.value("REACTION_SCALE", settings.reactionScale);
+            settings.turbulenceScale =
+                vg.value("TURBULENCE_SCALE", settings.turbulenceScale);
+            settings.buoyancyScale =
+                vg.value("BUOYANCY_SCALE", settings.buoyancyScale);
+            settings.smokeAdvection =
+                vg.value("SMOKE_ADVECTION", settings.smokeAdvection);
+            settings.sourceCompactness =
+                vg.value("SOURCE_COMPACTNESS",
+                         settings.sourceCompactness);
+            settings.canopySpread =
+                vg.value("CANOPY_SPREAD", settings.canopySpread);
+            settings.canopyDensity =
+                vg.value("CANOPY_DENSITY", settings.canopyDensity);
+
+            printf("Building sparse combustion grid for geom %zu ...\n",
+                   geoms.size());
+            HostSparseVolumeGrid grid =
+                buildSparseCombustionGrid(settings);
+            std::string gridError;
+            if (!validateSparseCombustionGrid(grid, &gridError)) {
+                std::cerr << "Invalid generated VOLUME_GRID: " << gridError
+                          << std::endl;
+                exit(-1);
+            }
+            newGeom.volumeGridId = static_cast<int>(volumeGrids.size());
+            printf("Sparse grid: %d x %d x %d cells, %zu active bricks "
+                   "(%.1f MiB fields)\n",
+                   grid.cellResolution.x, grid.cellResolution.y,
+                   grid.cellResolution.z, grid.bricks.size(),
+                   (grid.combustionSamples.size() +
+                    grid.thermalFlowSamples.size()) *
+                       sizeof(glm::vec4) / (1024.0 * 1024.0));
+            printVolumeFieldSummary(grid);
+            volumeGrids.emplace_back(std::move(grid));
+        } else if (objectMaterial.type == MEDIUM &&
+                   objectMaterial.mediumFieldModel ==
+                       MEDIUM_FIELD_SPARSE_GRID) {
+            std::cerr << "A SparseGrid medium object is missing VOLUME_GRID."
+                      << std::endl;
+            exit(-1);
+        }
 
         geoms.push_back(newGeom);
         geomMeshData.push_back(newMeshData);
@@ -737,6 +1079,8 @@ void Scene::loadFromJSON(const std::string &jsonName) {
         if (materials[newGeom.material.materialId].emittance > 0.0f &&
             materials[newGeom.material.materialId].type != MEDIUM) {
             lights.push_back(newGeom);
+            areaLightGeomIndices.push_back(
+                static_cast<int>(geoms.size()) - 1);
             // Non-owning copy: shares geomMeshData's host pointers (freed once,
             // via geomMeshData).
             lightMeshData.push_back(newMeshData);
@@ -793,6 +1137,44 @@ void Scene::loadFromJSON(const std::string &jsonName) {
                       << std::endl;
             exit(-1);
         }
+    }
+
+    // PBRT's PowerLightSampler motivates this compact CDF. With only tens of
+    // emitters, a binary-searched CDF is smaller than an alias table and has
+    // negligible lookup cost. The same PMF is copied to the original geom for
+    // reverse/hit-light MIS, which is required for an unbiased estimator.
+    areaLightCdf.assign(lights.size(), 0.0f);
+    std::vector<float> lightWeights(lights.size(), 0.0f);
+    float totalLightWeight = 0.0f;
+    for (std::size_t i = 0; i < lights.size(); ++i) {
+        const Material &material =
+            materials[lights[i].material.materialId];
+        const glm::vec3 spectrumProxy =
+            illuminantRGB(material.spectrumType, material.blackbodyTemp);
+        const float emittedY = fmaxf(
+            luminance(material.color * spectrumProxy) * material.emittance,
+            0.0f);
+        const float weight = lights[i].surfaceArea > 0.0f && emittedY > 0.0f
+                                 ? fmaxf(lights[i].surfaceArea * emittedY,
+                                         1e-8f)
+                                 : 0.0f;
+        lightWeights[i] = weight;
+        totalLightWeight += weight;
+    }
+    if (!lights.empty() && totalLightWeight <= 0.0f) {
+        std::fill(lightWeights.begin(), lightWeights.end(), 1.0f);
+        totalLightWeight = static_cast<float>(lights.size());
+    }
+    float cumulativeLightPmf = 0.0f;
+    for (std::size_t i = 0; i < lights.size(); ++i) {
+        const float pmf = lightWeights[i] / totalLightWeight;
+        cumulativeLightPmf += pmf;
+        areaLightCdf[i] = cumulativeLightPmf;
+        lights[i].areaLightSelectionPmf = pmf;
+        geoms[areaLightGeomIndices[i]].areaLightSelectionPmf = pmf;
+    }
+    if (!areaLightCdf.empty()) {
+        areaLightCdf.back() = 1.0f;
     }
 
     // Default to no depth of field. These MUST be written even when the JSON

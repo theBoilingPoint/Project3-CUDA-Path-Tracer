@@ -1,0 +1,47 @@
+{
+  "generated": "2026-08-04",
+  "renderer": "cis565_path_tracer Release",
+  "scenes": [
+    {
+      "name": "candle",
+      "scene": "scenes/jsons/volumetric/showcase_candle.json",
+      "output_resolution": [800, 600],
+      "volume_grid_resolution": [48, 96, 48],
+      "spp": 1024,
+      "trace_seconds": 109.85,
+      "artifacts": [
+        {"file": "volumetric_candle_showcase.png", "bytes": 89010, "sha256": "6B6925F3469B5A16441073299FEDB2C671406553FB0154759D7509E321D3BA0A"},
+        {"file": "volumetric_candle_showcase.raw.png", "bytes": 145687, "sha256": "5B9AB2AD4382933A401096B69690488A51654A29C668808B57F34ABAAAC994FA"},
+        {"file": "volumetric_candle_showcase.hdr", "bytes": 1296835, "sha256": "0324FE7CFE480444EE72E753B0E184021FE831F0B86C54EA398F4402712DB3F7"}
+      ]
+    },
+    {
+      "name": "wood_fire",
+      "scene": "scenes/jsons/volumetric/showcase_wood_fire.json",
+      "output_resolution": [960, 540],
+      "volume_grid_resolution": [112, 128, 80],
+      "spp": 1024,
+      "trace_seconds": 308.95,
+      "artifacts": [
+        {"file": "volumetric_wood_fire_showcase.png", "bytes": 234098, "sha256": "6AB1E29DDF88978A658B7D41100364045D0B0234D7AE72F7A16CF17485243844"},
+        {"file": "volumetric_wood_fire_showcase.raw.png", "bytes": 504874, "sha256": "5A5B7EB8FD04EDCB49953242A50DC4A3668BCE08F9706D1953610542CDCE900A"},
+        {"file": "volumetric_wood_fire_showcase.hdr", "bytes": 1564344, "sha256": "90A38E8EF8AEDD67EDFB5134E695FE33C263CD73F791A03E17F7AE2CBC75CACE"}
+      ]
+    },
+    {
+      "name": "wildfire",
+      "scene": "scenes/jsons/volumetric/showcase_wildfire.json",
+      "output_resolution": [960, 540],
+      "volume_grid_resolution": [192, 160, 160],
+      "active_bricks": 3328,
+      "field_memory_mib": 74.0,
+      "spp": 512,
+      "trace_seconds": 264.87,
+      "artifacts": [
+        {"file": "volumetric_wildfire_showcase.png", "bytes": 354515, "sha256": "459D7B68FC8C2E8102D81C96273D963279D3A8245DB21A71F318C18995FFBDD6"},
+        {"file": "volumetric_wildfire_showcase.raw.png", "bytes": 932973, "sha256": "D0A1D203934B257BD7FBD087CF574FFB285E1EC8E5868125DC1812E67FA83BE4"},
+        {"file": "volumetric_wildfire_showcase.hdr", "bytes": 1737510, "sha256": "ADC898DDC968CEE646A841AEAB5F315AEC598235869E18EDB7403159DB551F46"}
+      ]
+    }
+  ]
+}

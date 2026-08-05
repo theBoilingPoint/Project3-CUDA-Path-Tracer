@@ -20,6 +20,29 @@ static bool headlessMode = false;
 static bool denoiseMode = false;
 static std::string outputBaseOverride;
 static int sppOverride = 0;
+static std::string volumeDebugOverride;
+static std::string volumeQualityOverride;
+
+static int volumeDebugModeFromCli(const std::string &name) {
+    if (name == "none") return VOLUME_DEBUG_NONE;
+    if (name == "temperature") return VOLUME_DEBUG_TEMPERATURE;
+    if (name == "density") return VOLUME_DEBUG_DENSITY;
+    if (name == "fuel") return VOLUME_DEBUG_FUEL;
+    if (name == "soot") return VOLUME_DEBUG_SOOT;
+    if (name == "reaction") return VOLUME_DEBUG_REACTION;
+    if (name == "emission") return VOLUME_DEBUG_EMISSION;
+    if (name == "sigma-a") return VOLUME_DEBUG_SIGMA_A;
+    if (name == "sigma-s") return VOLUME_DEBUG_SIGMA_S;
+    if (name == "sigma-t") return VOLUME_DEBUG_SIGMA_T;
+    if (name == "velocity") return VOLUME_DEBUG_VELOCITY;
+    if (name == "majorant") return VOLUME_DEBUG_MAJORANT;
+    if (name == "null-rate") return VOLUME_DEBUG_NULL_RATE;
+    if (name == "event-count") return VOLUME_DEBUG_EVENT_COUNT;
+    if (name == "direct-volume") return VOLUME_DEBUG_DIRECT_VOLUME;
+    if (name == "indirect-volume") return VOLUME_DEBUG_INDIRECT_VOLUME;
+    if (name == "surface-fire") return VOLUME_DEBUG_SURFACE_FIRE;
+    return -1;
+}
 
 // For camera controls
 static bool leftMousePressed = false;
@@ -55,7 +78,8 @@ int main(int argc, char** argv)
     if (argc < 2)
     {
         printf("Usage: %s SCENEFILE.json [--headless] [--denoise] [--spp N] "
-               "[--output FILE_BASE]\n",
+               "[--output FILE_BASE] [--volume-debug MODE] "
+               "[--volume-quality reference|debug]\n",
                argv[0]);
         return 1;
     }
@@ -79,6 +103,23 @@ int main(int argc, char** argv)
                     ".png") {
                 outputBaseOverride.resize(outputBaseOverride.size() - 4);
             }
+        } else if (strcmp(argv[i], "--volume-debug") == 0 &&
+                   i + 1 < argc) {
+            volumeDebugOverride = argv[++i];
+            if (volumeDebugModeFromCli(volumeDebugOverride) < 0) {
+                fprintf(stderr, "Unknown --volume-debug mode: %s\n",
+                        volumeDebugOverride.c_str());
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--volume-quality") == 0 &&
+                   i + 1 < argc) {
+            volumeQualityOverride = argv[++i];
+            if (volumeQualityOverride != "reference" &&
+                volumeQualityOverride != "debug") {
+                fprintf(stderr,
+                        "--volume-quality must be reference or debug.\n");
+                return 1;
+            }
         } else {
             fprintf(stderr, "Unknown or incomplete option: %s\n", argv[i]);
             return 1;
@@ -87,6 +128,16 @@ int main(int argc, char** argv)
 
     // Load scene file
     scene = new Scene(sceneFile);
+    if (!volumeDebugOverride.empty()) {
+        scene->volumeIntegrator.debugMode =
+            volumeDebugModeFromCli(volumeDebugOverride);
+    }
+    if (!volumeQualityOverride.empty()) {
+        scene->volumeIntegrator.quality =
+            volumeQualityOverride == "reference"
+                ? VOLUME_QUALITY_REFERENCE
+                : VOLUME_QUALITY_DEBUG;
+    }
 
     //Create Instance for ImGUIData
     guiData = new GuiDataContainer();

@@ -5,11 +5,11 @@ CUDA Path Tracer
 
 * Xinran Tao
   - [LinkedIn](https://www.linkedin.com/in/xinran-tao/), [Personal Website](https://www.xinrantao.com/), [GitHub](https://github.com/theBoilingPoint).
-* Tested on: 
-  - Ubuntu 22.04, i7-11700K @ 3.60GHz × 16, RAM 32GB, GeForce RTX 3080 Ti 12GB (Personal)
+* Tested on:
+  - Windows 11, Intel(R) Core(TM) Ultra 9 285H @ 2.90 GHz, RAM 32 GB, GeForce RTX 5090 Laptop GPU 24 GB
 
 # Introduction
-This project showcases an advanced path tracer powered by CUDA, emphasising on expanding the material capabilities of path tracing. While many aspects of path tracing can be explored, I have chosen to enhance material features for this project rather than adding accelerated structures.
+This project showcases an advanced CUDA path tracer with surface, spectral, mesh, and sparse volumetric rendering features.
 
 Below are two versions of the final renders. The scene file can be found at `./scenes/jsons/final_scene/final.json`.
 
@@ -181,7 +181,7 @@ We can see that with antialiasing, the edges of the objects are smoother and the
 
 # Advanced Features
 ## Visual Improvements
-All visual improvements closely follow the theories in *Physically Based Rendering:From Theory To Implementation (PBRT)*.
+All visual improvements closely follow the theories in *Physically Based Rendering: From Theory to Implementation (PBRT)*.
 
 ### Dielectric (Refraction)
 To use a dielectric material, the following json should be defined in the scene file:
@@ -402,173 +402,402 @@ Costs: the path state grows by 32 bytes (wavelengths + pdfs), throughput/radianc
 
 ## Volumetric Rendering (Participating Media)
 
-The renderer supports participating media as first-class path-integral
-participants, following the null-scattering formulation used by
-[PBRT-v4's `VolPathIntegrator`](https://pbr-book.org/4ed/Light_Transport_II_Volume_Rendering/Volume_Scattering_Integrators).
-Any cube or sphere geom can be turned into a volume by giving it a `Medium`
-material; its surface becomes an invisible null boundary and its interior can
-scatter, absorb, and emit light.
+A cube or sphere with a `Medium` material becomes an invisible null boundary
+whose interior can absorb, scatter, and emit light. Sparse combustion grids
+use cube boundaries so they can traverse a local axis-aligned brick domain.
 
-The following are the current tuned showcase renders. See
-[`TODO.md`](./TODO.md) for the full diagnosis, measurements, commands, and
-remaining limitations.
+### Diagnosis
+
+The original cloud and smoke fields were max-unions of solid spheres. Noise
+eroded those unions but could not remove their round scaffold. Optical depths
+in the tens made the media nearly opaque, broad frontal lighting flattened
+extinction gradients, and the original PNG path clipped linear HDR values.
+The cotton-like result therefore came from both density design and scene/output
+parameters, not a Henyey-Greenstein sign error or a broken Woodcock tracker.
+
+Revised cloud, fog, and smoke profiles use connected 3-D fields, bounded
+multiscale modulation, moderate optical depth, and lighting that reveals
+internal extinction. Fire uses stored combustion fields instead of a rescaled
+cloud, billboard, polygon, or scrolling alpha texture.
+
+### Showcase scenes and status
 
 | Cloud | Fog |
 |:--:|:--:|
 | ![](./img/volumetric_cloud_showcase.png) | ![](./img/volumetric_fog_showcase.png) |
-| Smoke | Fire |
+
+| Smoke | Standalone fire |
+|:--:|:--:|
 | ![](./img/volumetric_smoke_showcase.png) | ![](./img/volumetric_fire_showcase.png) |
 
 | Combined cloud, fog, smoke, and fire |
 |:--:|
 | ![](./img/volumetric_combined_showcase.png) |
 
-### Scene description
+| Candle, 1024 spp | Wood fire, 1024 spp |
+|:--:|:--:|
+| ![](./img/volumetric_candle_showcase.png) | ![](./img/volumetric_wood_fire_showcase.png) |
+
+| Wildfire, 512 spp on a 192 x 160 x 160 field |
+|:--:|
+| ![](./img/volumetric_wildfire_showcase.png) |
+
+The static combustion scenes are:
+
+- `scenes/jsons/volumetric/showcase_candle.json`
+- `scenes/jsons/volumetric/showcase_wood_fire.json`
+- `scenes/jsons/volumetric/showcase_wildfire.json`
+
+These are the accepted post-audit static renders. Every scene has a denoised
+display PNG, a non-denoised `.raw.png`, and a scene-linear Radiance `.hdr`.
+The candle traced in 109.85 s, the wood fire in 308.95 s, and the wildfire in
+264.87 s. Exact sizes and SHA-256 hashes are recorded in
+`img/volumetric_fire_showcases_manifest.json`.
+
+The ten final artifacts were published and metadata-verified in the requested
+[Google Drive folder](https://drive.google.com/drive/folders/18TMgF1j5UxUOooPnN2XOiyb-8whefwUB).
+The uploaded [manifest](https://drive.google.com/file/d/1GKIGmF8VjTXTinvtyTHJySjk_q4pMGEk/view?usp=drivesdk)
+records the local byte sizes and SHA-256 hashes.
+
+### Static sparse combustion fields
+
+A deterministic semi-Lagrangian solve runs once at scene load and bakes one
+static 3-D snapshot:
+
+| Field | Rendering role |
+|:--|:--|
+| Density | Smoke/gas absorption and scattering |
+| Soot | Strong absorption, weaker scattering, and hot-soot emission |
+| Fuel | Source placement and diagnostics |
+| Reaction | Thin emitting and absorbing combustion regions |
+| Temperature | Planck blackbody color and HDR intensity |
+| Velocity | Wind, buoyancy, coherent advection, and diagnostics |
+
+Density, soot, fuel, and reaction share one float4 field. Temperature and
+velocity share a second. Wind, buoyancy, and two divergence-free curl-noise
+scales drive coherent advection with separate cooling and dissipation rates.
+
+`Candle` injects heat and vapor around a compact wick. `WoodFire` uses localized
+log-surface and gap sources. `Wildfire` builds an irregular fuel-attached front
+with many short flames, occasional taller folds, and substantially more
+downwind smoke. Char, ash, coal, vegetation, and ember geometry are static
+context; they do not replace the flame volume.
+
+### GPU storage and hardware filtering
+
+This is a custom sparse-brick representation, not an OpenVDB/NanoVDB importer.
+Each active brick owns `8^3` logical cells and a duplicated positive-side
+`9^3` halo. A dense brick-resolution page table maps logical coordinates to
+compact active-brick indices; `-1` means empty.
+
+Active payloads are packed into two CUDA 3-D texture atlases, one float4 atlas
+per field group. Each brick's atlas origin is precomputed. Runtime interpolation
+uses two hardware-filtered `tex3D` operations, while the page table and brick
+DDA still skip empty space. Per-brick halos prevent filtering between unrelated
+atlas tiles.
+
+Halo maxima receive an order-independent 26-neighbor expansion. Combining those
+maxima with the active spectral coefficients and an outward-rounding margin
+produces conservative local extinction majorants. The object's inverse
+transform supplies the world-to-volume mapping.
+
+A sparse grid is selected with `FIELD_MODEL: "SparseGrid"` on the medium and a
+`VOLUME_GRID` block on its cube:
 
 ```json
-"smoke":
 {
-    "TYPE":"Medium",
-    "SIGMA_A":[0.58, 0.54, 0.50],
-    "SIGMA_S":[0.16, 0.17, 0.19],
-    "G":0.32,
-    "DENSITY":1.35,
-    "HETEROGENEOUS":true,
-    "PROFILE":"Plume",
-    "NOISE_SCALE":6.3,
-    "NOISE_OCTAVES":5,
-    "NOISE_SEED":29
+  "TYPE": "cube",
+  "MATERIAL": "combustion",
+  "TRANS": [0.0, 4.0, 0.0],
+  "ROTAT": [0.0, 0.0, 0.0],
+  "SCALE": [8.0, 8.0, 4.0],
+  "VOLUME_GRID": {
+    "PRESET": "WoodFire",
+    "RESOLUTION": [112, 128, 80],
+    "SEED": 61,
+    "WIND": [0.12, 0.10, -0.20],
+    "DENSITY_SCALE": 1.0,
+    "SOOT_SCALE": 1.0,
+    "REACTION_SCALE": 1.0,
+    "TURBULENCE_SCALE": 1.0,
+    "BUOYANCY_SCALE": 1.0,
+    "SMOKE_ADVECTION": 1.0
+  }
 }
 ```
 
-- `SIGMA_A` / `SIGMA_S` — absorption and scattering cross-sections per unit distance (RGB; uplifted to spectra in spectral builds).
-- `G` — [Henyey-Greenstein](https://www.astro.umd.edu/~jph/HG_note.pdf) phase-function asymmetry in (-1, 1): 0 is isotropic, positive scatters forward (clouds are strongly forward-scattering).
-- `DENSITY` — global multiplier on both sigmas.
-- `HETEROGENEOUS` — `true` evaluates a procedural density field in the geom's local space; `false` is a uniform medium.
-- `PROFILE` — the density field's large-scale shape: `"Fbm"` for generic
-  thresholded wisps, `"Cloud"` for a connected smooth-summed bank of
-  anisotropic 3-D updraft fields with an irregular base and volumetric
-  erosion, `"Plume"` for a continuous expanding smoke column around an
-  advected axis, `"Fog"` for a soft low bank, or `"Flame"` for tapered and
-  forked fire tongues. `NOISE_SCALE`, `NOISE_OCTAVES`, and `NOISE_SEED`
-  control the decorating noise.
-- `EMISSION` — optional scalar volumetric-emission strength.
-  `EMISSION_RGB` or `SPECTRUM` sets its color. The `Flame` profile modulates
-  emission spatially and by a relative temperature field.
+Every resolution component must be positive and divisible by eight. Showcase
+JSON files are the source of truth for tuned values.
 
-Media must be cube or sphere geoms because shadow transmittance needs an
-analytic ray/interior interval. Media may emit, but nested or overlapping
-containers are not supported because each path currently stores one active
-medium. The camera must start in vacuum. Geometry type and camera placement
-are validated at scene load; scene authors must keep medium containers
-disjoint.
+### Optical model, transport, and lighting
 
-### Method
+At a filtered point:
 
-The implementation lives in `src/render/volume.h` (sampling routines) and `src/render/pathtrace.cu` (integration), and plugs into the same closure/MIS machinery as the surface BSDFs:
+```text
+m = material-level DENSITY scale
+sigma_a = m * (density * smokeSigmaA + soot * sootSigmaA
+               + reaction * flameSigmaA)
+sigma_s = m * (density * smokeSigmaS + soot * sootSigmaS)
+sigma_t = sigma_a + sigma_s
+```
 
-**Medium tracking.** Each path carries the index of the medium it is currently inside (`PathSegment::mediumGeom`, −1 in vacuum). Hitting a `Medium` geom's surface is a *null interface*: the ray passes straight through unchanged, the inside/outside state toggles, and **no path bounce is consumed** — only real scattering events count.
+Smoke uses the Henyey-Greenstein phase function. Stored temperature drives
+analytic Planck blackbody emission in unclamped HDR; a temperature-gated soot
+term supplies incandescent orange emission while cooler soot remains primarily
+absorptive. An equal-energy illuminant double-normalization found during
+cross-renderer validation was removed.
 
-**Distance sampling.** Whenever a ray segment starts inside a medium, a free-flight distance is sampled against the segment to the next surface:
-- *Homogeneous media* use the analytic exponential distribution `p(t) = σ_t e^(−σ_t t)`, sampled with the **hero wavelength's** σ_t.
-- *Heterogeneous media* use **delta (Woodcock) tracking** against a constant majorant `σ_maj = max_λ σ_t(λ)`: tentative collisions are sampled from the majorant exponential, classified real with probability `σ_t(x)/σ_maj` (hero-driven), and null otherwise.
+Camera and continuation rays use local-majorant delta tracking. Shadow rays use
+ratio tracking with the same majorants and empty-brick skipping. Real medium
+events use next-event estimation and power-heuristic MIS, including surface
+visibility and ratio-tracked medium transmittance. Multiple volume scattering
+is supported. Reference transport does not use fixed ray-march steps.
 
-If the sampled distance passes the surface, the path continues to the surface with its throughput multiplied by the transmittance weight; otherwise a **real scatter event** replaces the surface hit: throughput picks up the single-scattering albedo term `σ_s/σ_t`, next-event estimation runs *at the scatter point*, and a new direction is drawn from the phase function.
+Homogeneous media with zero scattering use a variance-free Beer-Lambert GPU
+fast path. Because no real scattering event can occur, the path continues with
+`exp(-sigma_t * distance)` instead of sampling a terminate/escape Bernoulli
+event. This preserves the estimator while substantially reducing soot noise
+and work.
 
-**Spectral correctness.** Sigma spectra are uplifted with the same Jakob-Hanika scheme as emission (`upliftSigma`), and all tracking decisions are driven by the hero wavelength while the other three wavelengths ride along with **per-wavelength ratio weights** — at a null collision each lane is reweighted by `(σ_maj − σ_t(λ))/(σ_maj − σ_t(hero))`, and the sampling pdf is averaged over the carried wavelengths ([Wilkie et al. 2014](https://cgg.mff.cuni.cz/publications/hero-wavelength-spectral-sampling/) balance heuristic, PBRT-v4's rescaled path probabilities collapsed to the single-sample form). This is what makes the amber fog's colored transmittance unbiased rather than a tinted approximation.
+The grid builds an emitted-power CDF over active bricks and a cell CDF inside
+each brick. Surface and medium vertices explicitly sample this extended 3-D
+emitter. Embedded vertices mix the hierarchy with a bounded local inverse-square
+proposal and evaluate the matching mixture PDF. Ordered stratified segment
+emission handles camera and specular paths.
 
-**Phase function as a closure.** The Henyey-Greenstein phase function is implemented as just another lobe of the BSDF closure interface (`makePhaseBSDF(g)` in `src/render/bxdf.h`) with flags `Diffuse|Reflection|Transmission` — it samples/evaluates over the full sphere and is never delta. Because of that, a medium scatter event flows through **exactly the same NEE + MIS code path** as a surface hit (`sampleDirectLighting`): the environment map, area lights, and point/directional lights are all importance-sampled from inside the volume, MIS-weighted against phase sampling with the power heuristic. HG is its own perfect importance sampler (value ≡ pdf), so phase-sampled bounces carry weight 1.
+Surface emitters use a separate PBRT-style power-weighted CDF. The same
+discrete PMF appears in NEE and hit-light MIS. Nonuniformly scaled emissive
+spheres evaluate the exact affine local-to-world area Jacobian for their
+conditional PDF.
 
-**Transmittance on shadow rays.** Every NEE shadow ray is now transmittance-aware (`shadowTransmittance`): opaque geometry still blocks, but medium boundaries don't — instead the ray's overlap interval with each medium is computed analytically (slab test / quadratic in the geom's local space) and the transmittance along it is accumulated: analytically (`exp(−σ_t d)`) for homogeneous media, and with **ratio tracking** ([Novák et al. 2014](https://cs.dartmouth.edu/~wjarosz/publications/novak14residual.html)) for heterogeneous ones, with Russian roulette on nearly-opaque channels to bound the loop. This gives volumes correct soft, colored shadows and lets surfaces inside a volume receive properly attenuated direct light.
+Fire therefore illuminates logs, ash, vegetation, smoke, and other geometry
+through path transport. Supplemental authored key/fill lights do not stand in
+for the complete fire-lighting solution.
 
-**Volume emission.** Every traveled segment of an emissive medium independently
-estimates `∫ T(0,s) j(s) ds` using four full-spectrum stratified samples.
-Homogeneous transmittance is analytic and heterogeneous transmittance is
-ratio-tracked. The flame profile supplies spatial source strength and a
-relative blackbody temperature; a small point-light proxy is still used when
-the flame must illuminate exterior surfaces directly.
+### Camera output, quality modes, and diagnostics
 
-**Tracking correctness.** Delta tracking and ratio tracking are unbiased
-estimators of free-flight and transmittance for density fields bounded by the
-majorant. Every authored profile is clamped to [0, 1] by construction (times
-`DENSITY`), and the 10,000-event safety cap is unreachable at the showcase
-scenes' optical depths. There is no ray-marching step size or step banding.
+Radiance accumulates in an unclamped scene-linear HDR buffer. `--denoise`
+filters a copy with OIDN; the original remains the source of `.hdr` and
+`.raw.png`. The display path always applies exposure. With `TONEMAP: true`, it
+then applies a fitted ACES curve and linear-sRGB to sRGB conversion; with
+`TONEMAP: false`, it writes exposed, clamped linear RGB. No bloom, alpha-flame
+glow, or screen-space heat wobble is baked into the shader.
 
-### Validation
+`Reference` retains multiple scattering, delta/ratio tracking, and four
+segment-emission strata per emissive brick. `Debug` limits real scattering
+depth and uses one stratum. Fixed-step compositing is confined to field
+visualization.
 
-- A `Medium` geom with `SIGMA_A = SIGMA_S = 0` is invisible: renders match the medium-free scene.
-- Scenes without media are unaffected: the plain Cornell box renders identically before and after the volumetric integration (the medium code is skipped entirely when `mediumGeom` is −1).
-- The amber fog sphere's transmitted color deepens with path length through the sphere (Beer-Lambert), and its shadow on the floor is correspondingly tinted.
+Available `--volume-debug` values are:
 
-Costs: each path stores the active-medium index and accumulated real-vertex
-distance used by MIS; scenes without media pay only a per-bounce branch. In
-media, cost scales with `σ_maj × path length` (expected number of tracking
-steps) plus one transmittance walk per shadow ray. Emissive media additionally
-use four stratified source samples per traveled segment.
+```text
+none
+temperature  density  fuel  soot  reaction  emission
+sigma-a      sigma-s  sigma-t
+velocity     majorant
+null-rate    event-count
+direct-volume  indirect-volume  surface-fire
+```
+
+With `VOLUME_STATS` enabled, headless output reports brick visits, empty skips,
+collisions, majorant violations, and tracking overflows. Statistics storage and
+atomics are absent when disabled.
+
+### Validation and official-renderer comparisons
+
+The registered CTest target has eleven internal groups covering preset
+construction, interpolation, page-table and emission-PDF invariants,
+conservative neighbor majorants, Beer-Lambert attenuation, the pure-absorption
+fast path, coefficient identities, Henyey-Greenstein normalization and first
+moment, Planck behavior, and malformed-resolution rejection. Controlled scenes
+live under `scenes/jsons/volumetric/validation/`.
+
+The project, Blender/Cycles, PBRT v4, and Mitsuba 3 were rendered with one
+shared homogeneous-volume protocol: 320 x 320, 4096 spp, depth 12, seed
+20260804, FOVY 28 degrees, camera `(0,0,5)`, a `[-1,1]^3` medium, black world,
+and a 6 x 6 backlight at scene-linear radiance 4. Soot is absorption-only; fog
+and smoke use separate absorption/scattering coefficients and HG anisotropy.
+Every metric PNG was regenerated from raw linear HDR/EXR with the same PBRT
+`imgtool --scale 0.25` conversion and no denoising.
+
+| Medium | Reference | PSNR | SSIM | LPIPS |
+|:--|:--|--:|--:|--:|
+| Soot | Blender | 46.3783 dB | 0.994043 | 0.003233 |
+| Soot | PBRT | 42.2976 dB | 0.958151 | 0.158097 |
+| Soot | Mitsuba | 42.6118 dB | 0.964107 | 0.157157 |
+| Fog | Blender | 48.2466 dB | 0.984537 | 0.006493 |
+| Fog | PBRT | 46.2880 dB | 0.975498 | 0.000910 |
+| Fog | Mitsuba | 47.3968 dB | 0.980979 | 0.002447 |
+| Smoke | Blender | 44.4404 dB | 0.971469 | 0.101108 |
+| Smoke | PBRT | 42.0947 dB | 0.947452 | 0.007550 |
+| Smoke | Mitsuba | 42.6334 dB | 0.953728 | 0.008778 |
+
+| Project and official 4096-spp references; identical framing and display conversion |
+|:--:|
+| ![](./img/volumetric_smoke_soot_fog_reference_comparison.png) |
+
+The complete comparison package is in the verified
+[Smoke, Soot, and Fog reference subfolder](https://drive.google.com/drive/folders/1lPvs7WDBx4DI2KgV1qbjjme13Z943Xg4).
+It contains 12 raw linear HDR/EXR renders, 12 normalized PNGs, the contact
+sheet, three implementation audits, a validation report, and the
+[machine-readable manifest](https://drive.google.com/file/d/1Qq8-YYq2MOqk5uMdOYNxigU0fT9AN9Vw/view?usp=drivesdk).
+Drive metadata readback verified all 30 names, MIME types, parent IDs, and
+12,962,727 bytes against the local package.
+
+These numbers are aligned implementation comparisons, not realism scores.
+They are comparable to the official-renderer pairwise spread; the weakest
+project fog and smoke pairs are respectively 1.60 dB and 1.15 dB below the
+weakest official pair, without a systematic shape or attenuation mismatch.
+Project PNG/HDR repeats and PBRT pixels are exact; fixed-seed Cycles and
+Mitsuba runs differ only by parallel floating-point reduction order (minimum
+repeat PSNR 102.48 dB and 143.78 dB respectively), so cross metrics are
+numerically reproducible.
+
+```powershell
+python .\scripts\compare_renders.py reference.png candidate.png --lpips
+```
+
+`compare_renders.py` requires NumPy, Pillow, and scikit-image; LPIPS also
+requires PyTorch and `lpips`.
+
+### Official renderer audit
+
+| Renderer | Revision/runtime | Relevant result |
+|:--|:--|:--|
+| Blender/Cycles | Blender `d769b0ee1e3`; CLI 5.1.2, OptiX | Audited volume stacks, octree majorants, null scattering, equiangular/distance MIS, blackbody handling, and GPU integration. The analytic absorption behavior was adopted; guiding/equiangular sampling remains profile-gated future work. |
+| Mitsuba 3 | `5f090a15`; Mitsuba 3.9.0, Dr.Jit 1.4.0, `cuda_ad_rgb` | Audited CUDA texture interpolation, homogeneous/heterogeneous media, HG, volume NEE/MIS, and null visibility. The project already implements these, with sparse local rather than global majorants. |
+| PBRT v4 | `7154d82`; recursive CPU `volpath`, `imgtool` | Audited spectral coefficients, HG, NanoVDB/grid media, DDA majorants, null collisions, ratio tracking, and power-light sampling. No correctness port was missing; NanoVDB import remains optional interoperability work. |
+
+PBRT v4 and audited Cycles files are Apache-2.0. Mitsuba 3 and Dr.Jit are
+BSD-3-Clause. Blender application source remains GPL.
+
+### Nsight performance
+
+Precomputed atlas origins moved the temporary low-resolution wildfire's 16-spp
+wall time from 8.57 s to 8.27 s. The final Systems report profiles the accepted
+`192 x 160 x 160` wildfire field at 4 spp:
+`.cache/official_repo_audit/nsys_wildfire_final_192grid_4spp.nsys-rep`.
+
+| GPU work, final 192-grid scene at 4 spp | Time | Share |
+|:--|--:|--:|
+| `shade` | 1.748 s | 81.3% |
+| `computeIntersections` | 0.244 s | 11.3% |
+| CUB merge | -- | 5.9% |
+| CUB block sort | -- | 0.8% |
+| Compaction | -- | 0.3% |
+
+The pure-absorption fast path reduced the aligned 320 x 320 soot render at
+4096 spp from 160.83 s to 63.40 s (60.6%). In its post-port 64-spp Nsight
+Systems trace, `shade` is 2.7% of GPU time while CUB merge sorting is 66.6%, so
+additional volume-shader work is not the next bottleneck for absorption-only
+media. The report is
+`.cache/reference_validation/project/nsys_soot_absorption_fastpath_64spp.nsys-rep`.
+
+Nsight Compute was attempted, but driver policy blocks counters with
+`ERR_NVGPUCTRPERM`; no `.ncu-rep` is claimed.
+
+### Static scope and limitations
+
+- These are deterministic static combustion snapshots. Animation, grid-time
+  interpolation, motion blur, dynamic fuel propagation, and ember trajectories
+  are intentionally outside the requested still-image scope.
+- OpenVDB/NanoVDB import and heat refraction are not implemented.
+- Nested/overlapping media are unsupported; cameras starting inside media are
+  rejected.
+- Embers are statically authored emissive geometry, not runtime particles.
+- Color-only OIDN can smooth low-SNR detail, so raw PNG and HDR must be reviewed.
+- Wood and wildfire props are purpose-built low-poly context, not photographic
+  vegetation.
+
+### Reproducible commands
+
+```powershell
+.\scripts\build.bat
+cmake --build .\build --config Release --target volume_grid_tests
+ctest --test-dir .\build -C Release -R volume_grid_tests --output-on-failure
+```
+
+Quick controlled-scene sweep:
+
+```powershell
+$exe = ".\build\bin\Release\cis565_path_tracer.exe"
+$tests = @(
+  "homogeneous_absorption_cube", "homogeneous_emitting_sphere",
+  "homogeneous_scattering_point", "heterogeneous_known_majorant",
+  "blackbody_temperature_ramp", "backlit_smoke",
+  "single_burning_log", "three_log_campfire",
+  "grass_strip_wind", "wildfire_grid_fields"
+)
+foreach ($name in $tests) {
+  & $exe ".\scenes\jsons\volumetric\validation\$name.json" `
+    --headless --spp 1 --output ".\.cache\validation\$name"
+}
+```
+
+Accepted beauty-render commands:
+
+```powershell
+$exe = ".\build\bin\Release\cis565_path_tracer.exe"
+& $exe .\scenes\jsons\volumetric\showcase_candle.json `
+  --headless --denoise --spp 1024 `
+  --output .\img\volumetric_candle_showcase
+& $exe .\scenes\jsons\volumetric\showcase_wood_fire.json `
+  --headless --denoise --spp 1024 `
+  --output .\img\volumetric_wood_fire_showcase
+& $exe .\scenes\jsons\volumetric\showcase_wildfire.json `
+  --headless --denoise --spp 512 `
+  --output .\img\volumetric_wildfire_showcase
+```
 
 ## Mesh Loading
-This project supports .obj/.gltf/.glb file loading. I read the data from the files using tinyobjloader and tinygltf. 
 
-Please feel free to play around with the final scene.
+The renderer supports `.obj`, `.gltf`, and `.glb` through TinyObjLoader and
+TinyGLTF.
 
-## Performance
-### Russian Roulette
-This feature can be turned on by setting `USE_RUSSIAN_ROULETTE` on top of the `pathtrace.cu` file. 
+## Other Performance Notes
 
-The data is collected from the scene file `./scenes/jsons/test_performance/russianRoulette.json`. 
+Russian roulette is controlled by `USE_RUSSIAN_ROULETTE` in
+`src/render/pathtrace.cu`. The original
+`scenes/jsons/test_performance/russianRoulette.json` benchmark measured
+reductions of 10.36%, 16.93%, and 36.47% at 960, 5,760, and 23,040 triangles,
+respectively. See
+`img/extraCredit/Russian Roulette Performance Chart.png` for the original
+chart. These historical surface-scene measurements are separate from the
+current Nsight volume profile above.
 
-![](./img/extraCredit/Russian%20Roulette%20Performance%20Chart.png)
+# Resources
 
-**At 960 Triangles:**
-- **Without Russian Roulette:** The time per frame is 2,583.36 milliseconds.
-- **With Russian Roulette:** The time per frame is 2,315.71 milliseconds.
-- **Performance Improvement:** Implementing Russian Roulette shows a reduction in rendering time of about 10.36%. At lower complexities, even though the absolute time saved is modest, the proportional improvement indicates that Russian Roulette effectively reduces unnecessary computations for rays that contribute minimally to the scene.
-
-**At 5,760 Triangles:**
-- **Without Russian Roulette:** The time per frame is 13,921.02 milliseconds.
-- **With Russian Roulette:** The time per frame is 11,564.03 milliseconds.
-- **Performance Improvement:** The use of Russian Roulette offers a more substantial performance improvement of 16.93% at this level of complexity. This suggests that as the number of interactions (due to more triangles) increases, the potential for terminating low-contributing rays becomes more impactful, thereby saving more computational time.
-
-**At 23,040 Triangles:**
-- **Without Russian Roulette:** The time per frame is 38,008.78 milliseconds.
-- **With Russian Roulette:** The time per frame is 24,141.30 milliseconds.
-- **Performance Improvement:** The improvement is the most pronounced at this high complexity level, with a reduction in rendering time of 36.47%. This large improvement underscores the efficiency of Russian Roulette in managing path lifetimes in highly complex scenes, where many rays might otherwise perform unnecessary calculations.
-
-#### Conclusion
-
-The data highlights that Russian Roulette is particularly effective in reducing rendering times as the scene complexity increases. The technique's probabilistic termination of less significant rays becomes increasingly beneficial with the complexity of the scene because there are more opportunities to eliminate computationally expensive paths that have little impact on the final image. 
-
-- **Low Complexity Scenes:** At lower triangle counts, the performance gains are noticeable and beneficial for applications where even small performance enhancements are valuable.
-- **Moderate Complexity Scenes:** As the triangle count and scene complexity increase, the benefits of Russian Roulette grow, making it highly suitable for more detailed scenes that are not at the peak of complexity but still require significant computation.
-- **High Complexity Scenes:** In very complex scenes, Russian Roulette can drastically reduce computational load, making it an essential technique for optimizing performance in high-detail or dynamic lighting conditions where path tracing traditionally suffers from high computational costs.
-
-The consistent increase in performance improvement across triangle counts provides a compelling case for the adoption of Russian Roulette in rendering scenarios where path optimization can lead to significant reductions in computational overhead and faster rendering times, without compromising on visual fidelity. This technique is especially relevant in real-time rendering applications and complex animation scenes where rendering speed is crucial.
-
-# Recources
 ## Libraries
+
 - [TinyObjLoader](https://github.com/tinyobjloader/tinyobjloader)
 - [TinyGLTF](https://github.com/syoyo/tinygltf)
-- [PBRT](https://pbr-book.org/)
-- [rgb2spec](https://github.com/mitsuba-renderer/rgb2spec) (spectral uplifting coefficient tables, BSD)
+- [rgb2spec](https://github.com/mitsuba-renderer/rgb2spec)
+- [PBRT v4](https://github.com/mmp/pbrt-v4)
+- [Mitsuba 3](https://github.com/mitsuba-renderer/mitsuba3)
+- [Blender/Cycles](https://github.com/blender/blender)
 
-## Papers & Implementations
-### Spectral Rendering
-- Wilkie et al., [*Hero Wavelength Spectral Sampling*](https://cgg.mff.cuni.cz/publications/hero-wavelength-spectral-sampling/), EGSR 2014
-- Jakob & Hanika, [*A Low-Dimensional Function Space for Efficient Spectral Upsampling*](https://rgl.epfl.ch/publications/Jakob2019Spectral), Eurographics 2019
+## Papers and implementations
 
-### Volumetric Rendering
-- Miller, Georgiev & Jarosz, [*A Null-Scattering Path Integral Formulation of Light Transport*](https://cs.dartmouth.edu/~wjarosz/publications/miller19null.html), SIGGRAPH 2019 — the framework this implementation follows
-- [PBRT-v4, Chapter 14: Light Transport II — Volume Rendering](https://pbr-book.org/4ed/Light_Transport_II_Volume_Rendering/Volume_Scattering_Integrators) and the open-source [pbrt-v4 `VolPathIntegrator`](https://github.com/mmp/pbrt-v4) — the reference implementation consulted for delta tracking, spectral ratio weights, and phase-function MIS
-- Novák, Selle & Jarosz, [*Residual Ratio Tracking for Estimating Attenuation in Participating Media*](https://cs.dartmouth.edu/~wjarosz/publications/novak14residual.html), SIGGRAPH Asia 2014 — shadow-ray transmittance
-- Woodcock et al., *Techniques Used in the GEM Code* (1965) — the original delta-tracking algorithm
-- Henyey & Greenstein, [*Diffuse Radiation in the Galaxy*](https://www.astro.umd.edu/~jph/HG_note.pdf) (1941) — the phase function
-- Kettunen, d'Eon, Pantaleoni & Novák, [*An Unbiased Ray-Marching Transmittance Estimator*](https://developer.nvidia.com/blog/nvidia-research-an-unbiased-ray-marching-transmittance-estimator/), SIGGRAPH 2021 — a lower-variance transmittance alternative worth adopting if dense media become a bottleneck
-- [NanoVDB](https://developer.nvidia.com/blog/accelerating-openvdb-on-gpus-with-nanovdb/) — GPU-friendly sparse voxel grids; the natural next step for loading real cloud/smoke assets into `mediumDensity`
+### Spectral rendering
+
+- Wilkie et al., [Hero Wavelength Spectral Sampling](https://cgg.mff.cuni.cz/publications/hero-wavelength-spectral-sampling/), EGSR 2014
+- Jakob and Hanika, [A Low-Dimensional Function Space for Efficient Spectral Upsampling](https://rgl.epfl.ch/publications/Jakob2019Spectral), Eurographics 2019
+
+### Volumetric rendering
+
+- Miller, Georgiev, and Jarosz, [A Null-Scattering Path Integral Formulation of Light Transport](https://cs.dartmouth.edu/~wjarosz/publications/miller19null.html), SIGGRAPH 2019
+- [PBRT v4, Volume Scattering Integrators](https://pbr-book.org/4ed/Light_Transport_II_Volume_Rendering/Volume_Scattering_Integrators)
+- Woodcock et al., *Techniques Used in the GEM Code* (1965)
+- Henyey and Greenstein, [Diffuse Radiation in the Galaxy](https://www.astro.umd.edu/~jph/HG_note.pdf) (1941)
+- Novák, Selle, and Jarosz, [Residual Ratio Tracking](https://cs.dartmouth.edu/~wjarosz/publications/novak14residual.html), SIGGRAPH Asia 2014 — related work, not the current shadow estimator
+- [NanoVDB](https://developer.nvidia.com/blog/accelerating-openvdb-on-gpus-with-nanovdb/) — audited as an alternative representation, not used here
 
 ## Art
+
 ### Models
+
 - [Meshes Used in the Cover Image](https://poly.pizza/bundle/Bubbly-Bathroom-Set-eSvpFVB4Ft)
 
-### Environment Maps
-- [Christmas Photo Studio 01](https://polyhaven.com/a/christmas_photo_studio_01)
+### Environment maps
 
+- Showcase environments are stored under `scenes/textures/env/`.

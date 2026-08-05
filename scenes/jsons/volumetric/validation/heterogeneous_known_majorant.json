@@ -1,0 +1,70 @@
+{
+  "Materials": {
+    "grid_medium": {
+      "TYPE": "Medium",
+      "FIELD_MODEL": "SparseGrid",
+      "SIGMA_A": [0.22, 0.22, 0.22],
+      "SIGMA_S": [0.08, 0.08, 0.08],
+      "SOOT_SIGMA_A": [0.55, 0.55, 0.55],
+      "SOOT_SIGMA_S": [0.02, 0.02, 0.02],
+      "FLAME_ABSORPTION_SCALE": 0.02,
+      "G": 0.0,
+      "DENSITY": 1.0,
+      "HETEROGENEOUS": true
+    },
+    "reference_panel": {
+      "TYPE": "Emitting",
+      "RGB": [1.0, 1.0, 1.0],
+      "EMITTANCE": 4.0,
+      "SPECTRUM": "E"
+    }
+  },
+  "Textures": {},
+  "Integrator": {
+    "VOLUME_QUALITY": "Debug",
+    "VOLUME_DEBUG": "Majorant",
+    "VOLUME_MAX_SCATTER_DEPTH": 4,
+    "VOLUME_STATS": true
+  },
+  "Lights": [],
+  "Camera": {
+    "RES": [320, 320],
+    "FOVY": 32.0,
+    "ITERATIONS": 4,
+    "DEPTH": 8,
+    "FILE": "heterogeneous_known_majorant",
+    "EXPOSURE": -1.0,
+    "TONEMAP": false,
+    "EYE": [0.0, 0.1, 5.0],
+    "LOOKAT": [0.0, 0.0, 0.0],
+    "UP": [0.0, 1.0, 0.0]
+  },
+  "Objects": [
+    {
+      "TYPE": "cube",
+      "MATERIAL": "grid_medium",
+      "TRANS": [0.0, 0.0, 0.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [2.2, 3.2, 2.2],
+      "VOLUME_GRID": {
+        "PRESET": "Candle",
+        "RESOLUTION": [32, 48, 32],
+        "SEED": 17,
+        "WIND": [0.02, 0.06, -0.03],
+        "DENSITY_SCALE": 1.0,
+        "SOOT_SCALE": 1.0,
+        "REACTION_SCALE": 1.0,
+        "TURBULENCE_SCALE": 1.0,
+        "BUOYANCY_SCALE": 1.0,
+        "SMOKE_ADVECTION": 1.0
+      }
+    },
+    {
+      "TYPE": "cube",
+      "MATERIAL": "reference_panel",
+      "TRANS": [0.0, 0.0, -3.0],
+      "ROTAT": [0.0, 0.0, 0.0],
+      "SCALE": [6.0, 6.0, 0.08]
+    }
+  ]
+}

@@ -66,6 +66,7 @@ set(headers
     src/core/cudaUtil.h
     src/scene/scene.h
     src/scene/sceneStructs.h
+    src/scene/volumeGrid.h
     src/scene/meshLoader.h
     src/scene/bvh.h
     src/render/pathtrace.h
@@ -76,6 +77,7 @@ set(headers
     src/render/spectral.h
     src/render/spectrumData.h
     src/render/volume.h
+    src/render/volumeGridDevice.h
     src/render/warp.h
     src/display/preview.h
     src/display/glslUtility.hpp
@@ -86,6 +88,7 @@ set(sources
     src/core/main.cpp
     src/core/utilities.cpp
     src/scene/scene.cpp
+    src/scene/volumeGrid.cpp
     src/scene/meshLoader.cpp
     src/scene/bvh.cpp
     src/render/pathtrace.cu
@@ -268,3 +271,42 @@ if(MSVC)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE NOMINMAX)
 endif()
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${CMAKE_PROJECT_NAME})
+
+# ----------------------------------------------------------------------------
+# Sparse combustion-grid validation
+# ----------------------------------------------------------------------------
+include(CTest)
+if(BUILD_TESTING)
+    set_source_files_properties(tests/volume_grid_tests.cpp
+        PROPERTIES LANGUAGE CUDA)
+    add_executable(volume_grid_tests
+        tests/volume_grid_tests.cpp
+        src/scene/volumeGrid.cpp)
+    target_include_directories(volume_grid_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/core
+        ${CMAKE_SOURCE_DIR}/src/scene
+        ${CMAKE_SOURCE_DIR}/src/render
+        ${CMAKE_SOURCE_DIR}/libs/glm)
+    target_compile_options(volume_grid_tests PRIVATE
+        "$<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>")
+    if(MSVC)
+        target_compile_options(volume_grid_tests PRIVATE
+            "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>"
+            "$<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>")
+        target_compile_definitions(volume_grid_tests PRIVATE
+            _HAS_STD_BYTE=0
+            NOMINMAX)
+    endif()
+    if(CMAKE_VERSION VERSION_LESS "3.23.0")
+        set_target_properties(volume_grid_tests PROPERTIES
+            CUDA_ARCHITECTURES OFF)
+    elseif(CMAKE_VERSION VERSION_LESS "3.24.0")
+        set_target_properties(volume_grid_tests PROPERTIES
+            CUDA_ARCHITECTURES all-major)
+    else()
+        set_target_properties(volume_grid_tests PROPERTIES
+            CUDA_ARCHITECTURES native)
+    endif()
+    add_test(NAME volume_grid_tests COMMAND volume_grid_tests)
+endif()

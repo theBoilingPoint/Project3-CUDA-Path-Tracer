@@ -1,334 +1,333 @@
-# Volumetric rendering diagnosis and showcase
+# Volumetric Rendering Status
 
-Last updated: 2026-07-28
+Last updated: 2026-08-04
 
-Status: complete
+Status: in progress. The earlier fire showcase and smoke/soot/fog transport
+audit remain frozen; two new Cornell-box recreation targets are being rendered
+in Blender, PBRT, Mitsuba, and this project.
 
-## Final verdict
+## Cornell Fire/Soot and Diagonal-Smoke Recreations
 
-The cotton-like result was caused by both implementation design and scene
-tuning. It was not primarily a Henyey-Greenstein sign error or a broken
-Woodcock tracker.
+- [x] Convert the supplied images into renderer-independent shape, opacity,
+  lighting, and color-transition acceptance criteria rather than attempting a
+  misleading pixel match.
+- [x] Start aligned 512 x 512 static heterogeneous-volume references in
+  Blender/Cycles, PBRT v4, and Mitsuba 3 with raw HDR/EXR retained.
+- [x] Add `cornell_diagonal_smoke_plume.json`: a rotated, coherent 3-D plume
+  with a dense warm-black core, broad translucent head, HG scattering, and a
+  red/green Cornell enclosure.
+- [x] Add `cornell_fire_soot_cloud.json`: one sparse field containing density,
+  soot, fuel, reaction, temperature, and velocity; no billboard or overlapping
+  volume is used.
+- [x] Add opt-in compact-source, canopy-spread, and baked soot-canopy controls
+  to let a small burner feed a connected broad smoke mass while preserving the
+  existing WoodFire defaults.
+- [ ] Accept final project macro-shape, fire white/yellow/orange transition,
+  smoke density gradient, and room illumination at useful SNR.
+- [ ] Finish and inspect all six official-reference renders.
+- [ ] Publish eight individual images and two labeled side-by-side comparison
+  sheets, then record settings, timings, and hashes.
+- [ ] Rebuild, run CTest, validate scene JSON, and refresh README status and
+  reproduction commands.
 
-The decisive implementation issue was the density model:
+## Final Delivery Checklist
 
-- `cloudDensity` was a max-union of 10 solid spheres.
-- `plumeDensity` was a max-union of 16 expanding spheres.
-- Noise only eroded those primitive unions, so their silhouettes necessarily
-  retained a cotton-ball scaffold.
+- [x] Validate and freeze the `192 x 160 x 160` wildfire grid after the
+  high-quality beauty gate passed.
+- [x] Render raw low/medium-sample wildfire gates and reject them when fixed-root
+  pickets, horizontal shelves, detached highlights, or a uniform yellow mass
+  returned.
+- [x] Freeze and render post-port candle, wood-fire, and wildfire scenes.
+- [x] Retain display PNG, non-denoised `.raw.png`, and scene-linear `.hdr` for
+  every final beauty.
+- [x] Review raw and denoised output together. OIDN does not invent flame
+  connectivity or hide unresolved grid structure.
+- [x] Rebuild Release and rerun the registered CTest target plus all ten
+  controlled volumetric scenes after the final scene/code freeze.
+- [x] Capture a final Nsight Systems profile of the accepted 192-grid wildfire
+  after its beauty render is accepted.
+- [x] Fill the final table below with measured SPP, timings, hashes, and
+  acceptance notes.
+- [x] Upload the accepted artifacts to the requested
+  [Google Drive folder](https://drive.google.com/drive/folders/18TMgF1j5UxUOooPnN2XOiyb-8whefwUB)
+  and verify names, sizes, MIME types, and parent-folder metadata.
+- [x] Render the same 320 x 320 homogeneous soot, fog, and smoke scenes at
+  4096 spp in the project, Blender/Cycles, PBRT v4, and Mitsuba 3.
+- [x] Normalize every raw HDR/EXR through the same `imgtool --scale 0.25`
+  display conversion before PSNR, SSIM, or LPIPS evaluation.
+- [x] Establish repeatability before using metrics: project and PBRT pixels
+  are exact; Cycles and Mitsuba are numerically stable at negligible
+  parallel-reduction error.
+- [x] Replace stochastic homogeneous pure absorption with a variance-free
+  Beer-Lambert GPU fast path and rerun tests, the soot reference, and Nsight
+  Systems.
+- [x] Upload and metadata-verify all 30 files in the official reference
+  [comparison subfolder](https://drive.google.com/drive/folders/1lPvs7WDBx4DI2KgV1qbjjme13Z943Xg4).
 
-The decisive tuning/display issues were:
+## Final Beauty Publication Gate
 
-- Original media had optical depths in the tens, making them behave like
-  opaque solids.
-- Linear radiance was clamped directly into the preview/PNG. In the supplied
-  `volumetric_cloud_sky.png`, 64.5% of segmented cloud pixels had at least one
-  clipped channel and 24.6% were pure white.
-- Broad frontal/overhead illumination removed most readable extinction
-  gradients.
-- The original "fog" was a small, optically thick tinted sphere, so it read as
-  a transparent brown object rather than atmospheric depth.
+| Scene | Resolution | SPP | Time | Raw QA | Display QA | Drive |
+|:--|:--:|--:|--:|:--:|:--:|:--:|
+| Candle | `800 x 600`; grid `48 x 96 x 48` | 1024 | 109.85 s | Accepted | Accepted | Published |
+| Wood fire | `960 x 540`; grid `112 x 128 x 80` | 1024 | 308.95 s | Accepted | Accepted | Published |
+| Wildfire | `960 x 540`; grid `192 x 160 x 160` | 512 | 264.87 s | Accepted | Accepted | Published |
 
-The revised implementation and scenes separate these concerns: cloud, fog,
-smoke, and fire now use distinct density, extinction, phase, lighting, and
-composition choices.
+All times are renderer-reported trace times; scene loading and static field
+generation are outside that timer. Exact artifact sizes and SHA-256 hashes are
+in `img/volumetric_fire_showcases_manifest.json`.
+Drive readback confirmed ten files, matching local byte sizes, expected PNG,
+Radiance HDR, and JSON MIME types, and the requested folder as the parent.
 
-## Completed work
+## Completed Renderer Work
 
-- [x] Audited medium free-flight sampling, null collisions, phase sampling,
-  boundary handling, direct lighting, and shadow transmittance.
-- [x] Replaced sphere-union cloud and smoke density fields.
-- [x] Added a dedicated soft ground-fog profile.
-- [x] Added a tapered/forked flame profile and participating-medium emission.
-- [x] Added tone mapping, exposure, sRGB output, linear HDR output, and
-  optional OIDN CUDA denoising.
-- [x] Added deterministic headless rendering.
-- [x] Added isolated cloud, fog, smoke, and fire scenes.
-- [x] Added a combined scene with all four effects.
-- [x] Rendered and visually inspected low-sample previews after each material,
-  lighting, and composition pass.
-- [x] Regenerate final showcase PNG, raw PNG, and HDR outputs after the last
-  audited density/emission changes.
-- [x] Regenerate the Nsight Systems profile against the final combined scene.
-- [x] Rebuilt and validated all final scene JSON files.
+### Static combustion fields
 
-## Original-scene measurements
+- [x] Added deterministic static semi-Lagrangian field generation at scene
+  load.
+- [x] Stored density, soot, fuel, reaction, temperature, and velocity.
+- [x] Added separate candle, wood-fire, and wildfire source presets.
+- [x] Used wind, buoyancy, and multiscale divergence-free curl noise for
+  coherent field advection.
+- [x] Kept smoke, soot, fuel, and temperature cooling/dissipation independent.
+- [x] Coupled char, ash, coal, burned ground, vegetation, and static emissive
+  embers to the corresponding showcase compositions.
+- [x] Removed billboard, crossed-quad, scrolling-alpha, and polygonal main
+  flame representations.
 
-- The initial sky cloud used `DENSITY = 6`, approximately
-  `sigma_t = 1.003`, and a `15 x 6.5 x 7` container. Its peak mean free path
-  was about 0.166 world units.
-- The Cornell cloud had a peak mean free path near 0.110 world units.
-- The smoke peak mean free paths were approximately 0.12 to 0.23 world units.
-- The original amber-fog sphere had center optical depth approximately
-  `[4.05, 4.86, 7.56]`, leaving only about
-  `[1.7%, 0.78%, 0.052%]` direct transmission.
+### Sparse GPU storage
 
-These values explain the opaque/cotton appearance even with otherwise correct
-transport.
+- [x] Added sparse `8^3` logical bricks with duplicated `9^3` interpolation
+  halos.
+- [x] Added a dense brick page table, compact active-brick payloads, and brick
+  DDA empty-space skipping.
+- [x] Added conservative halo maxima with order-independent 26-neighbor
+  expansion and outward rounding.
+- [x] Preserved the medium object's world-to-volume transform.
+- [x] Packed active payloads into two float4 CUDA 3-D texture atlases.
+- [x] Precomputed every brick's atlas origin and replaced manual trilinear
+  loads with two hardware-filtered `tex3D` operations.
+- [x] Kept page-table traversal and local majorants independent of the texture
+  representation.
 
-## Transport audit
+### Optical model and transport
 
-Confirmed correct:
+- [x] Derived absorption, scattering, extinction, and emission independently
+  from stored matter/temperature fields.
+- [x] Added analytic Planck blackbody emission plus temperature-gated
+  incandescent-soot emission in unclamped HDR.
+- [x] Fixed equal-energy illuminant double-normalization discovered by the
+  matched Mitsuba comparison.
+- [x] Added local-majorant delta tracking for camera/continuation free flight.
+- [x] Added local-majorant ratio tracking for shadow transmittance.
+- [x] Added Henyey-Greenstein phase sampling, multiple volume scattering,
+  volume next-event estimation, and power-heuristic MIS.
+- [x] Added an analytic Beer-Lambert continuation path when homogeneous
+  `sigma_s` is zero, eliminating a useless absorption/escape Bernoulli event.
+- [x] Added ordered stratified segment emission with independent transmittance
+  tracking.
+- [x] Added a brick/cell emitted-power hierarchy and a bounded local
+  inverse-square mixture proposal for vertices embedded in fire.
+- [x] Added explicit extended-volume-emitter sampling from surface and medium
+  vertices, allowing fire to illuminate nearby geometry and smoke.
+- [x] Added a separate PBRT-style power-weighted surface-light CDF.
+- [x] Used the same surface-light PMF in NEE and hit-light MIS.
+- [x] Corrected nonuniform affine-sphere light sampling with the exact
+  local-to-world area Jacobian.
 
-- HG evaluation and sampling use one consistent propagation-direction
-  convention. Positive `G` is forward scattering.
-- Heterogeneous free flight uses hero-wavelength delta tracking against a
-  valid constant majorant.
-- Heterogeneous shadow transmittance uses ratio tracking.
-- Density profiles remain bounded in `[0, 1]`, so the majorant remains valid.
-- Homogeneous media use analytic exponential free-flight sampling.
-- Environment, area, point, and directional lights are sampled at real medium
-  events through the existing NEE/MIS closure path.
+### Diagnostics and output
 
-Correctness fixes made during the audit:
+- [x] Added reference/debug quality modes consuming the same fields.
+- [x] Added temperature, density, fuel, soot, reaction, emission,
+  absorption/scattering/extinction, velocity, majorant, collision, event, and
+  contribution AOVs.
+- [x] Added optional volume statistics without allocating counters when
+  disabled.
+- [x] Added deterministic headless rendering, SPP/output overrides, raw PNG,
+  scene-linear HDR, exposure, optional OIDN CUDA denoising, and a conditional
+  display path: ACES plus sRGB when `TONEMAP` is enabled, or exposed, clamped
+  linear RGB when it is disabled.
 
-- Null boundaries no longer consume the effective path-depth budget through
-  the outer traversal loop.
-- Area-light MIS now uses total distance since the last real vertex, including
-  distance crossed before and after null interfaces.
-- Signed-overflow undefined behavior was removed from the RNG/noise hashes.
-- HG inverse sampling is clamped at extreme `G`.
-- The camera is explicitly rejected when it starts inside a medium because the
-  current path state assumes vacuum initially.
-- Emissive-medium integration now uses an independent four-stratum,
-  full-spectrum estimate of `integral T(0,s) j(s) ds`; it is not coupled to
-  the hero-wavelength free-flight event.
-- Terminated secondary spectral wavelengths contribute zero at the sensor.
-- Scene loading rejects shaped profiles on homogeneous media and scans
-  referenced geometry, rather than unused material declarations, when
-  validating that a scene has illumination.
-- PNG/HDR write failures propagate to a nonzero headless exit status.
-- JSON `FOVY` is now interpreted as a full vertical field of view using
-  `tan(FOVY / 2)`.
-- The headless accumulation divisor is restored to the actual SPP count after
-  the render loop.
+## Official Renderer Audit
 
-## Density and appearance changes
+Local source revisions:
 
-### Cloud
+| Renderer | Revision/runtime | Findings and adopted work |
+|:--|:--|:--|
+| Blender/Cycles | Blender `d769b0ee1e3`; Blender CLI 5.1.2, OptiX | Audited volume stacks, octree majorants, null scattering, equiangular/distance MIS, blackbody handling, and GPU volume integration. Its analytic absorption behavior motivated the new fast path; guiding and equiangular sampling remain profile-gated future work. |
+| Mitsuba 3 | `5f090a15`; Mitsuba 3.9.0, Dr.Jit 1.4.0, `cuda_ad_rgb` | Audited CUDA texture interpolation, homogeneous and heterogeneous media, HG, volume NEE/MIS, and null visibility. The project already has these transport features plus sparse local majorants. |
+| PBRT v4 | `7154d82`; recursive CPU `volpath` and `imgtool` | Audited spectral coefficients, HG, NanoVDB/grid media, DDA majorants, null collisions, ratio tracking, and power-light sampling. No correctness port was missing; NanoVDB import remains optional interoperability work. |
 
-- One connected, smooth-summed implicit condensation shelf replaces the
-  former max-union of solid sphere primitives.
-- Several anisotropic 3-D updraft fields merge through a saturating sum,
-  giving the cloud a coherent base, shoulders, and rising towers without
-  exposing the individual construction fields.
-- Gaussian field tails provide natural tapering. A depth-coherent irregular
-  base and silhouette erosion prevent a flat cutout or container edge.
-- Three-dimensional value-noise/Worley modulation erodes the interior and
-  creates smaller wisps without breaking the macro shape into cotton balls.
-- Moderate optical depth and oblique lighting preserve core shading instead
-  of clipping the entire body to white.
+License boundary:
 
-### Fog
+- Blender application source is GPL.
+- Audited Cycles files under `intern/cycles` are individually Apache-2.0.
+- PBRT v4 is Apache-2.0.
+- Mitsuba 3 and Dr.Jit are BSD-3-Clause.
+- No official-renderer implementation was copied wholesale; adapted concepts
+  are documented above.
 
-- A low heterogeneous bank with broad horizontal variation, denser low
-  layers, sparse lifted wisps, and a vertical fade before the container top.
-- Three progressively smaller red markers at increasing depth make extinction
-  immediately visible.
-- The final view shows progressive desaturation/occlusion rather than a hard
-  tinted sphere.
+## Validation and Determinism
 
-### Smoke
+### Project tests
 
-- One continuous rising column around a wandering advected axis.
-- Radius expands gradually and dissipates at the top; there is no terminal
-  mushroom sphere.
-- Height-stretched noise produces sheets and wisps.
-- Absorption dominates scattering, producing a dark soot core.
-- Outdoor sunset backlighting makes the upper plume readable; a restrained
-  warm source light colors only the lower plume.
+- [x] Registered one CTest target containing eleven internal sparse-volume
+  groups.
+- [x] Covered preset construction, exact trilinear interpolation, page-table
+  invariants, conservative neighbor majorants, brick/cell CDF and PDF support,
+  sampled/evaluated PDF agreement, Beer-Lambert attenuation, the
+  absorption-only free-flight fast path, coefficient identities,
+  Henyey-Greenstein normalization/moment/sampling, Planck behavior, and
+  malformed-resolution rejection.
+- [x] Added thirteen controlled scenes:
+  `homogeneous_absorption_cube`, `homogeneous_emitting_sphere`,
+  `homogeneous_scattering_point`, `heterogeneous_known_majorant`,
+  `blackbody_temperature_ramp`, `backlit_smoke`, `single_burning_log`,
+  `three_log_campfire`, `grass_strip_wind`, `wildfire_grid_fields`,
+  `reference_soot_absorption`, `reference_fog_scattering`, and
+  `reference_smoke_scattering`.
+- [x] Verified fixed-seed reproducibility: repeated absorbing and stochastic
+  scattering renders produced byte-identical PNG/HDR hashes.
 
-### Fire
+### Aligned smoke, soot, and fog metrics
 
-- A tapered main tongue plus two upper forks.
-- Density and temperature vary spatially.
-- Continuous blackbody-compatible medium emission is integrated along each
-  traveled segment with four stratified samples.
-- A colocated warm point-light proxy illuminates nearby exterior surfaces.
+All four renderers use the same 320 x 320 camera, `[-1,1]^3` medium, 6 x 6
+backlight with scene-linear radiance 4, black world, depth 12, seed 20260804,
+4096 spp, and physical coefficients. Raw HDR/EXR files are retained; the
+metric PNGs all use PBRT `imgtool convert --scale 0.25` with no denoising.
+Metrics are implementation comparisons, not realism scores.
 
-## Implementation map
+| Medium | Reference | PSNR | SSIM | LPIPS (AlexNet) |
+|:--|:--|--:|--:|--:|
+| Soot | Blender | 46.3783 dB | 0.994043 | 0.003233 |
+| Soot | PBRT | 42.2976 dB | 0.958151 | 0.158097 |
+| Soot | Mitsuba | 42.6118 dB | 0.964107 | 0.157157 |
+| Fog | Blender | 48.2466 dB | 0.984537 | 0.006493 |
+| Fog | PBRT | 46.2880 dB | 0.975498 | 0.000910 |
+| Fog | Mitsuba | 47.3968 dB | 0.980979 | 0.002447 |
+| Smoke | Blender | 44.4404 dB | 0.971469 | 0.101108 |
+| Smoke | PBRT | 42.0947 dB | 0.947452 | 0.007550 |
+| Smoke | Mitsuba | 42.6334 dB | 0.953728 | 0.008778 |
 
-- `src/render/volume.h`
-  - HG helpers.
-  - Safe deterministic value/Worley/fBm noise.
-  - `Cloud`, `Fog`, `Plume`, and `Flame` density profiles.
-  - Homogeneous/heterogeneous free-flight and transmittance estimators.
-  - Spatial flame emission and relative temperature.
-- `src/render/pathtrace.cu`
-  - Medium integration and emission.
-  - Null-interface traversal and MIS-distance bookkeeping.
-  - Stable domain-separated RNG seeding.
-  - Display transform for the interactive PBO.
-- `src/core/color.h`
-  - ACES fitted curve, exposure, and exact linear-to-sRGB transfer.
-- `src/core/main.cpp`
-  - `--headless`, `--spp`, `--output`, and `--denoise`.
-  - Raw/denoised/HDR save workflow.
-- `src/scene/scene.cpp`, `src/scene/sceneStructs.h`
-  - Medium emission, profile, seed, validation, camera exposure/tone-map
-    fields, and corrected FOV handling.
-- `src/display/image.cpp`
-  - Checked PNG/HDR writes.
-  - Nonnegative scene-linear Radiance RGBE output; signed out-of-gamut and
-    non-finite components are clipped because RGBE cannot represent them.
+The results are comparable to the official-renderer spread: official pairwise
+PSNR ranges are 41.22-44.63 dB for soot, 47.88-51.23 dB for fog, and
+43.25-46.65 dB for smoke. The weakest project fog and smoke pairs are 1.60 dB
+and 1.15 dB below those official minima, with no systematic shape or
+attenuation mismatch. Fixed-seed project PNG/HDR pairs are byte exact; PBRT
+repeat pixels are exact. Cycles repeat PSNR is at least 102.48 dB and Mitsuba
+raw repeat PSNR is at least 143.78 dB, so their remaining variation is
+floating-point reduction order rather than a changed sample sequence.
 
-## Scene files
+Evidence is under `.cache/reference_validation/`; the aggregate comparison
+image, raw references, metrics, audits, and manifest are included in the Drive
+delivery. Drive readback matched all 30 names, MIME types, parent IDs, and
+12,962,727 local bytes.
 
-| Effect | Scene |
-| --- | --- |
-| Cloud | `scenes/jsons/volumetric/showcase_cloud.json` |
-| Fog | `scenes/jsons/volumetric/showcase_fog.json` |
-| Smoke | `scenes/jsons/volumetric/showcase_smoke.json` |
-| Fire | `scenes/jsons/volumetric/showcase_fire.json` |
-| Combined | `scenes/jsons/volumetric/showcase_combined.json` |
+## Nsight Evidence
 
-The combined scene keeps the four medium containers spatially disjoint. The
-current path state stores only one active medium index and therefore does not
-support nested or overlapping media.
+Pre-grid and intermediate reports remain useful historical baselines, but only
+the post-port capture describes the hardware-texture implementation.
 
-## Reproducible commands
+- Texture-atlas origin precomputation moved the temporary low-resolution
+  wildfire's 16-spp wall time from 8.57 s to 8.27 s.
+- Final post-port report:
+  `.cache/official_repo_audit/nsys_wildfire_final_192grid_4spp.nsys-rep`.
+- Accepted 192-grid scene at 4 spp:
+  - `shade`: 1.748 s, 81.3%.
+  - `computeIntersections`: 0.244 s, 11.3%.
+  - CUB merge: 5.9%.
+  - CUB block sort: 0.8%.
+  - Compaction: 0.3%.
+- The homogeneous soot fast path reduced the same 320 x 320, 4096-spp render
+  from 160.83 s to 63.40 s (60.6%) while removing absorption-event variance.
+- In the post-port 64-spp Systems trace, `shade` is only 2.7% of GPU time;
+  CUB merge sorting dominates at 66.6%, so further volume-shader ports are not
+  justified by this workload.
+- Post-port report:
+  `.cache/reference_validation/project/nsys_soot_absorption_fastpath_64spp.nsys-rep`.
+- Nsight Compute was attempted, but hardware counters are blocked by driver
+  policy (`ERR_NVGPUCTRPERM`). No `.ncu-rep` is claimed.
 
-Build:
+## Diagnosis Summary
+
+The initial cotton-like media came from both implementation design and tuning:
+
+- Clouds used a max-union of ten solid spheres.
+- Smoke used a max-union of sixteen expanding spheres.
+- Noise eroded those primitives but retained their round silhouettes.
+- Original media had optical depths in the tens and behaved like opaque solids.
+- Direct linear-to-PNG clipping erased internal HDR gradients.
+- Broad frontal/overhead light removed readable self-shadowing.
+- The original fog was a small optically thick tinted sphere rather than an
+  atmospheric depth cue.
+
+The transport audit did not find an HG sign error or invalid Woodcock
+majorant. The decisive changes were connected 3-D fields, moderate optical
+depth, physically separated coefficients/emission, better lighting/exposure,
+and sparse stored combustion fields.
+
+## Static Scope and Known Limitations
+
+- The requested output is static offline still imagery. Animation, grid-time
+  interpolation, motion blur, dynamic fuel propagation, and animated ember
+  trajectories/collisions are intentionally out of scope.
+- There is no OpenVDB/NanoVDB importer; the project uses a custom static
+  procedural sparse grid.
+- Gradient-index heat refraction is not implemented.
+- Nested or overlapping media are unsupported because a path stores one active
+  medium index.
+- Cameras starting inside media are rejected at load time.
+- Embers are static authored emissive geometry, not a runtime particle system.
+- Supplemental key/fill lights remain allowed, but fire emission participates
+  in path transport and is not replaced by a point-light proxy.
+- OIDN is color-only and may smooth low-SNR fine flame structure. Raw PNG and
+  HDR are mandatory acceptance evidence.
+- Wood and wildfire context meshes are purpose-built low-poly props rather than
+  photographic vegetation.
+
+## Reproducible Commands
+
+Build and test:
 
 ```powershell
-cmake --build .\build --config Release --target cis565_path_tracer
+.\scripts\build.bat
+cmake --build .\build --config Release --target volume_grid_tests
+ctest --test-dir .\build -C Release -R volume_grid_tests --output-on-failure
 ```
 
-Validate all showcase JSON:
+Quick controlled-scene sweep:
 
 ```powershell
-Get-ChildItem .\scenes\jsons\volumetric -Filter 'showcase_*.json' |
-  ForEach-Object {
-    Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json | Out-Null
-  }
-```
-
-Render pattern:
-
-```powershell
-$spp = @{
-  cloud = 1536
-  fog = 1536
-  smoke = 1536
-  fire = 1024
-  combined = 1536
+$exe = ".\build\bin\Release\cis565_path_tracer.exe"
+$tests = @(
+  "homogeneous_absorption_cube", "homogeneous_emitting_sphere",
+  "homogeneous_scattering_point", "heterogeneous_known_majorant",
+  "blackbody_temperature_ramp", "backlit_smoke",
+  "single_burning_log", "three_log_campfire",
+  "grass_strip_wind", "wildfire_grid_fields"
+)
+foreach ($name in $tests) {
+  & $exe ".\scenes\jsons\volumetric\validation\$name.json" `
+    --headless --spp 1 --output ".\.cache\validation\$name"
 }
-
-$spp.GetEnumerator() | ForEach-Object {
-  .\build\bin\Release\cis565_path_tracer.exe `
-    ".\scenes\jsons\volumetric\showcase_$($_.Key).json" `
-    --headless --denoise --spp $_.Value `
-    --output ".\img\volumetric_$($_.Key)_showcase"
-}
 ```
 
-`--denoise` requests OIDN for the display PNG:
-
-- `<base>.png` is OIDN CUDA denoised when OIDN succeeds, then
-  exposure/tone-mapped/sRGB encoded; it falls back to the raw display if OIDN
-  is unavailable or fails.
-- `<base>.raw.png` is always written when `--denoise` is requested and contains
-  the undenoised accumulated frame after the same display transform.
-- `<base>.hdr` is nonnegative scene-linear radiance. Negative/non-finite
-  out-of-gamut components are clipped for Radiance RGBE storage.
-
-## Final renders
-
-| Effect | Resolution | SPP | Time | Display PNG |
-| --- | ---: | ---: | ---: | --- |
-| Cloud | 800 x 450 | 1536 | 71.86 s | `img/volumetric_cloud_showcase.png` |
-| Fog | 800 x 450 | 1536 | 42.36 s | `img/volumetric_fog_showcase.png` |
-| Smoke | 800 x 450 | 1536 | 51.28 s | `img/volumetric_smoke_showcase.png` |
-| Fire | 800 x 450 | 1024 | 42.04 s | `img/volumetric_fire_showcase.png` |
-| Combined | 960 x 540 | 1536 | 134.92 s | `img/volumetric_combined_showcase.png` |
-
-Each display PNG has matching `.raw.png` and `.hdr` files in `img/`.
-
-Visual acceptance notes:
-
-- Cloud: connected low cloud bank, irregular condensation base, asymmetric
-  updraft towers, self-shadowed core, and no discrete sphere chain.
-- Fog: soft bank with clearly progressive marker loss over depth and no hard
-  container ceiling.
-- Smoke: dark, continuous S-shaped plume with warm dense source and cool
-  dissipating top.
-- Fire: bright hot core, cooler tapered/forked tip, visible environmental glow,
-  and no emissive surface standing in for the flame volume.
-- Combined: all four regimes remain visually distinct in one frame.
-
-## Nsight Systems result
-
-Tool:
-
-```text
-NVIDIA Nsight Systems 2026.1.3
-```
-
-`nsys` was not on this PowerShell session's `PATH`; the executable resolved to
-`C:\Program Files\NVIDIA Corporation\Nsight Systems 2026.1.3\target-windows-x64\nsys.exe`.
-
-Capture command:
+Deterministic comparisons:
 
 ```powershell
-$nsys = 'C:\Program Files\NVIDIA Corporation\Nsight Systems 2026.1.3\target-windows-x64\nsys.exe'
-& $nsys profile --trace=cuda --sample=none --cpuctxsw=none `
-  --force-overwrite=true `
-  --output=.\.cache\volumetric_combined_nsys `
-  .\build\bin\Release\cis565_path_tracer.exe `
-  .\scenes\jsons\volumetric\showcase_combined.json `
-  --headless --spp 24 --output .\.cache\nsys_combined_render
+python .\scripts\compare_renders.py reference.png candidate.png --lpips
+conda run -n base python .\scripts\render_mitsuba_homogeneous_absorption.py `
+  --output-dir .\.cache\official_repo_audit\mitsuba_reference `
+  --spp 4096 --seed 20260804 --runs 2
 ```
 
-Report:
+Beauty-render template (replace `<accepted-spp>` after the final gate):
 
-```text
-.cache/volumetric_combined_nsys.nsys-rep
+```powershell
+$exe = ".\build\bin\Release\cis565_path_tracer.exe"
+& $exe .\scenes\jsons\volumetric\showcase_wildfire.json `
+  --headless --denoise --spp <accepted-spp> `
+  --output .\img\volumetric_wildfire_showcase
 ```
 
-CUDA GPU time breakdown:
-
-- `shade`: 68.7%
-- CUB merge-sort merge kernel: 20.5%
-- `computeIntersections`: 4.4%
-- CUB block sort: 3.0%
-- Remaining kernels: 3.4%
-
-CUDA API time is dominated by `cudaDeviceSynchronize` (55.6%) and
-`cudaStreamSynchronize` (29.3%). This profile identifies synchronization and
-per-bounce material sorting as the main performance opportunities; it does not
-indicate a volumetric correctness failure. `shade` includes the procedural
-density, free-flight, transmittance, phase, and medium-emission work, so its
-larger final share is expected after replacing the primitive density fields.
-
-## Validation result
-
-- Release build succeeds.
-- All five final scene files parse as JSON.
-- Headless rendering, raw HDR output, raw PNG output, and OIDN CUDA output all
-  execute successfully.
-- A strict raw/denoised visual review passes the standalone cloud for the
-  sphere-chain/cotton criterion and passes all four effects in the combined
-  frame.
-- `ctest --test-dir .\build -C Release --output-on-failure` succeeds, but this
-  repository currently registers no automated tests.
-- `git diff --check` reports no whitespace errors (only the repository's
-  existing LF-to-CRLF conversion warnings).
-- Expected compiler/linker warnings remain:
-  - existing GLM CUDA annotation warnings,
-  - existing `APIENTRY` macro redefinition warning,
-  - existing `LNK4098` runtime-library warning.
-
-## Known limitations and follow-up
-
-- Nested/overlapping media are unsupported because each path stores one active
-  medium index. A future implementation should use a medium stack or priority
-  system.
-- Cameras inside media are unsupported and rejected at load time.
-- Emissive media are visible to camera and indirect paths, but are not sampled
-  as extended lights from arbitrary exterior points. The fire scenes use a
-  warm point proxy for exterior illumination.
-- Color-only OIDN can smooth very fine low-SNR volume structure. Raw PNG and
-  linear HDR are always retained for evaluation.
-- Nsight shows that removing unconditional synchronization and reconsidering
-  full material sorting would improve performance more than micro-optimizing
-  the procedural noise.
+Final SPP and timing values remain placeholders until the publication gate is
+complete.
